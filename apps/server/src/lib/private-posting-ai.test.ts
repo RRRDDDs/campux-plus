@@ -1,0 +1,346 @@
+import { describe, expect, test } from "bun:test";
+import { DEFAULT_PRIVATE_POST_PROMPT } from "@campux/domain";
+import { buildPrivatePostSystemPrompt, fallbackAnalyzePrivatePostSemantics, normalizePrivatePostSemanticResult, parsePrivatePostSemanticJson } from "./private-posting-ai";
+
+describe("private post AI semantic parsing", () => {
+  test("parses standard JSON response", () => {
+    expect(
+      parsePrivatePostSemanticJson(JSON.stringify({
+        intent: "post",
+        action: "submit",
+        text: "第一段\n第二段",
+        anonymous: true,
+        shouldSubmit: true,
+        sections: ["第一段", "第二段"],
+        confidence: 0.92,
+        reason: "用户明确匿名提交",
+      })),
+    ).toEqual({
+      intent: "post",
+      action: "submit",
+      text: "第一段\n第二段",
+      anonymous: true,
+      shouldSubmit: true,
+      sections: ["第一段", "第二段"],
+      confidence: 0.92,
+      reason: "用户明确匿名提交",
+      rawOutput: {
+        intent: "post",
+        action: "submit",
+        text: "第一段\n第二段",
+        anonymous: true,
+        shouldSubmit: true,
+        sections: ["第一段", "第二段"],
+        confidence: 0.92,
+        reason: "用户明确匿名提交",
+      },
+    });
+  });
+
+  test("accepts fenced JSON and clamps malformed confidence", () => {
+    const parsed = parsePrivatePostSemanticJson('```json\n{"intent":"post","text":"内容","anonymous":false,"shouldSubmit":false,"confidence":2}\n```');
+    expect(parsed?.confidence).toBe(1);
+    expect(parsed?.anonymous).toBe(false);
+    expect(parsed?.sections).toEqual(["内容"]);
+  });
+
+  test("normalizes Chinese semantic action values", () => {
+    expect(parsePrivatePostSemanticJson(JSON.stringify({
+      intent: "command",
+      action: "确认提交",
+      text: "正文",
+      anonymous: null,
+      shouldSubmit: true,
+      confidence: 0.8,
+    }))?.action).toBe("submit");
+
+    expect(parsePrivatePostSemanticJson(JSON.stringify({
+      intent: "command",
+      action: "取消本次提交",
+      text: "正文",
+      anonymous: null,
+      shouldSubmit: false,
+      confidence: 0.8,
+    }))?.action).toBe("cancel");
+
+    expect(parsePrivatePostSemanticJson(JSON.stringify({
+      intent: "command",
+      action: "撤回上一条内容",
+      text: "正文",
+      anonymous: null,
+      shouldSubmit: false,
+      confidence: 0.8,
+    }))?.action).toBe("undo");
+  });
+
+  test("fallback detects existing-draft cancellation controls without LLM", () => {
+    for (const messageText of ["取消", "取消投稿", "撤销稿件", "撤回投稿"]) {
+      const result = fallbackAnalyzePrivatePostSemantics({
+        messageText,
+        currentDraftText: "原稿内容",
+        hasCurrentDraft: true,
+      });
+      expect(result.intent).toBe("command");
+      expect(result.action).toBe("cancel");
+      expect(result.text).toBe("");
+      expect(result.sections).toEqual([]);
+      expect(result.reason).toBe("fallback_cancel_current_draft");
+    }
+  });
+
+  test("fallback detects existing-draft undo controls without LLM", () => {
+    const result = fallbackAnalyzePrivatePostSemantics({
+      messageText: "撤回上一条",
+      currentDraftText: "原稿内容",
+      hasCurrentDraft: true,
+    });
+    expect(result.intent).toBe("command");
+    expect(result.action).toBe("undo");
+    expect(result.text).toBe("");
+    expect(result.sections).toEqual([]);
+    expect(result.reason).toBe("fallback_undo_current_draft");
+  });
+
+  test("fallback does not infer natural-language post intent without LLM", () => {
+    const result = fallbackAnalyzePrivatePostSemantics({ messageText: "帮我匿名投稿：今天食堂阿姨特别好，可以直接发" });
+    expect(result.intent).toBe("chat");
+    expect(result.anonymous).toBe(null);
+    expect(result.shouldSubmit).toBe(false);
+    expect(result.text).toBe("");
+    expect(result.reason).toBe("llm_unavailable");
+  });
+
+  test("fallback keeps ordinary chat with anonymity words out of post flow", () => {
+    const result = fallbackAnalyzePrivatePostSemantics({ messageText: "我想匿名问一下怎么注册账号" });
+    expect(result.intent).toBe("chat");
+    expect(result.shouldSubmit).toBe(false);
+  });
+
+  test("fallback keeps ordinary chat out of post flow", () => {
+    const result = fallbackAnalyzePrivatePostSemantics({ messageText: "你好，请问怎么注册账号" });
+    expect(result.intent).toBe("chat");
+    expect(result.shouldSubmit).toBe(false);
+  });
+
+  test("normalizes casual crowd-question LLM post result back to chat", () => {
+    const result = normalizePrivatePostSemanticResult(
+      {
+        intent: "post",
+        action: "none",
+        text: "好奇大家高考考的怎么样啊",
+        anonymous: null,
+        shouldSubmit: false,
+        sections: ["好奇大家高考考的怎么样啊"],
+        confidence: 0.86,
+        reason: "LLM 误判为评价征集",
+      },
+      { messageText: "好奇大家高考考的怎么样啊", hasCurrentDraft: false, imageCount: 0 },
+    );
+
+    expect(result.intent).toBe("chat");
+    expect(result.text).toBe("");
+    expect(result.sections).toEqual([]);
+    expect(result.shouldSubmit).toBe(false);
+    expect(result.reason).toContain("casual_crowd_question");
+  });
+
+  test("normalization tolerates malformed missing reason", () => {
+    const result = normalizePrivatePostSemanticResult(
+      {
+        intent: "post",
+        action: "none",
+        text: "好奇大家高考考的怎么样啊",
+        anonymous: null,
+        shouldSubmit: false,
+        sections: ["好奇大家高考考的怎么样啊"],
+        confidence: 0.86,
+      } as never,
+      { messageText: "好奇大家高考考的怎么样啊", hasCurrentDraft: false, imageCount: 0 },
+    );
+
+    expect(result.intent).toBe("chat");
+    expect(result.reason).toBe("casual_crowd_question");
+  });
+
+  test("normalization keeps explicit post requests as post", () => {
+    const result = normalizePrivatePostSemanticResult(
+      {
+        intent: "post",
+        action: "submit",
+        text: "今天食堂阿姨特别好",
+        anonymous: true,
+        shouldSubmit: true,
+        sections: ["今天食堂阿姨特别好"],
+        confidence: 0.92,
+        reason: "明确要求匿名投稿",
+      },
+      { messageText: "帮我匿名投稿：今天食堂阿姨特别好", hasCurrentDraft: false, imageCount: 0 },
+    );
+
+    expect(result.intent).toBe("post");
+    expect(result.text).toBe("今天食堂阿姨特别好");
+    expect(result.anonymous).toBe(true);
+    expect(result.shouldSubmit).toBe(true);
+  });
+
+  test("normalization keeps aggregated anonymous multi-question intake as post", () => {
+    const messageText = [
+      "我想问一下",
+      "学校有多大?",
+      "食堂饭菜好吃吗",
+      "老师教的好吗?",
+      "匿名",
+      "谢谢",
+    ].join("\n");
+
+    const result = normalizePrivatePostSemanticResult(
+      {
+        intent: "post",
+        action: "submit",
+        text: "我想问一下\n学校有多大?\n食堂饭菜好吃吗\n老师教的好吗?",
+        anonymous: true,
+        shouldSubmit: true,
+        sections: ["我想问一下", "学校有多大?", "食堂饭菜好吃吗", "老师教的好吗?"],
+        confidence: 0.9,
+        reason: "用户连续发送多条投稿内容并指定匿名",
+      },
+      { messageText, hasCurrentDraft: false, imageCount: 0 },
+    );
+
+    expect(result.intent).toBe("post");
+    expect(result.anonymous).toBe(true);
+    expect(result.shouldSubmit).toBe(true);
+  });
+
+  test("normalization upgrades weak-model chat result for aggregated multi-message wall post", () => {
+    const messageText = [
+      "墙墙投稿",
+      "我想问问另外一个墙咋了",
+      "我的稿件好久没发了",
+      "谢谢墙",
+      "匿名",
+    ].join("\n");
+    const result = normalizePrivatePostSemanticResult(
+      {
+        intent: "chat",
+        action: "none",
+        text: messageText,
+        anonymous: null,
+        shouldSubmit: false,
+        sections: ["墙墙投稿", "我想问问另外一个墙咋了", "我的稿件好久没发了", "谢谢墙", "匿名"],
+        confidence: 0.72,
+        reason: "模型将问句误判为咨询",
+      },
+      { messageText, hasCurrentDraft: false, imageCount: 0 },
+    );
+
+    expect(result.intent).toBe("post");
+    expect(result.anonymous).toBe(true);
+    expect(result.text).toBe("我想问问另外一个墙咋了\n我的稿件好久没发了");
+    expect(result.sections).toEqual(["我想问问另外一个墙咋了", "我的稿件好久没发了"]);
+    expect(result.reason).toContain("explicit_private_post_request");
+  });
+
+  test("normalization keeps casual wall chat as chat", () => {
+    const result = normalizePrivatePostSemanticResult(
+      {
+        intent: "chat",
+        action: "none",
+        text: "",
+        anonymous: null,
+        shouldSubmit: false,
+        sections: [],
+        confidence: 0.8,
+        reason: "普通咨询",
+      },
+      { messageText: "墙墙在吗", hasCurrentDraft: false, imageCount: 0 },
+    );
+
+    expect(result.intent).toBe("chat");
+  });
+
+  test("normalization infers anonymous preference from do-not-show-name phrasing", () => {
+    const messageText = "墙墙投稿\n我想问问另外一个墙咋了\n不要显示名字";
+    const result = normalizePrivatePostSemanticResult(
+      {
+        intent: "chat",
+        action: "none",
+        text: messageText,
+        anonymous: null,
+        shouldSubmit: false,
+        sections: ["墙墙投稿", "我想问问另外一个墙咋了", "不要显示名字"],
+        confidence: 0.72,
+        reason: "模型将问句误判为咨询",
+      },
+      { messageText, hasCurrentDraft: false, imageCount: 0 },
+    );
+
+    expect(result.intent).toBe("post");
+    expect(result.anonymous).toBe(true);
+    expect(result.text).toBe("我想问问另外一个墙咋了");
+  });
+
+  test("normalization infers non-anonymous preference before anonymous substring", () => {
+    for (const modeLine of ["不匿名", "不要匿名", "别匿名"]) {
+      const messageText = `墙墙投稿\n我想问问另外一个墙咋了\n${modeLine}`;
+      const result = normalizePrivatePostSemanticResult(
+        {
+          intent: "chat",
+          action: "none",
+          text: messageText,
+          anonymous: null,
+          shouldSubmit: false,
+          sections: ["墙墙投稿", "我想问问另外一个墙咋了", modeLine],
+          confidence: 0.72,
+          reason: "模型将问句误判为咨询",
+        },
+        { messageText, hasCurrentDraft: false, imageCount: 0 },
+      );
+
+      expect(result.intent).toBe("post");
+      expect(result.anonymous).toBe(false);
+      expect(result.text).toBe("我想问问另外一个墙咋了");
+    }
+  });
+
+  test("normalization keeps how-to-submit question as chat", () => {
+    const result = normalizePrivatePostSemanticResult(
+      {
+        intent: "chat",
+        action: "none",
+        text: "",
+        anonymous: null,
+        shouldSubmit: false,
+        sections: [],
+        confidence: 0.8,
+        reason: "流程咨询",
+      },
+      { messageText: "如何投稿", hasCurrentDraft: false, imageCount: 0 },
+    );
+
+    expect(result.intent).toBe("chat");
+  });
+
+  test("uses custom private post prompt as full system prompt", () => {
+    const customPrompt = "请判断以下内容是否为校园墙稿件，只返回 JSON";
+    const prompt = buildPrivatePostSystemPrompt(customPrompt);
+    expect(prompt).toBe(customPrompt);
+    expect(prompt).not.toContain("租户补充规则");
+  });
+
+  test("uses default prompt when custom private post prompt is blank", () => {
+    const prompt = buildPrivatePostSystemPrompt("  \n  ");
+    expect(prompt).toBe(DEFAULT_PRIVATE_POST_PROMPT);
+    expect(prompt).toContain("校园墙 QQ 私聊投稿语义解析器");
+    expect(prompt).toContain("action");
+    expect(prompt).toContain("none|submit|cancel|undo");
+    expect(prompt).toContain("发布吧");
+    expect(prompt).toContain("不要用关键词表或单个词命中做判断");
+    expect(prompt).toContain("是");
+    expect(prompt).toContain("否");
+    expect(prompt).toContain("连续发送多条可发布内容");
+    expect(prompt).toContain("询问学校规模、食堂饭菜、老师教学");
+    expect(prompt).not.toContain("即使提到学校/高考/食堂/老师，也不要判定为稿件");
+    expect(prompt).not.toContain("租户补充规则");
+  });
+});

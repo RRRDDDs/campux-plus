@@ -1,0 +1,192 @@
+import { z } from "zod";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+const configSchema = z.object({
+  NODE_ENV: z.enum(["development", "test", "production"]).default("production"),
+  DATABASE_URL: z.string().default("postgresql://campux:campux@localhost:5432/campux_next"),
+  CAMPUX_SERVER_HOST: z.string().default("0.0.0.0"),
+  CAMPUX_SERVER_PORT: z.coerce.number().int().positive().default(8989),
+  CAMPUX_WEB_ORIGIN: z.string().default("http://localhost:5180"),
+  CAMPUX_WEB_DIST_DIR: z.string().default("apps/web/dist"),
+  S3_ENDPOINT: z.string().default("http://localhost:9000"),
+  S3_REGION: z.string().default("auto"),
+  S3_BUCKET: z.string().default("campux-next"),
+  S3_ACCESS_KEY_ID: z.string().default("campux"),
+  S3_SECRET_ACCESS_KEY: z.string().default("campux-secret"),
+  S3_PUBLIC_BASE_URL: z.string().default("http://localhost:9000/campux-next"),
+  // 存储后端：'s3'（MinIO/S3 兼容）或 'local'（本地文件系统，零依赖单文件形态）。
+  // 留空时按数据库 provider 推断（sqlite→local，postgresql→s3），见 loadConfig。
+  CAMPUX_STORAGE_DRIVER: z.enum(["s3", "local"]).optional(),
+  // local driver 的数据根目录，对象按 key 落到此目录下。默认 ./data/uploads。
+  CAMPUX_STORAGE_LOCAL_DIR: z.string().default("./data/uploads"),
+  // 显式覆盖数据库 provider（sqlite|postgresql）；留空按 DATABASE_URL scheme 推断。
+  CAMPUX_DB_PROVIDER: z.enum(["sqlite", "postgresql"]).optional(),
+  RESEND_API_KEY: z.string().optional(),
+  RESEND_FROM_EMAIL: z.string().default("Campux <noreply@campux.top>"),
+  // Required in production (see ensureBotSessionSecretConfigured); used to
+  // encrypt stored bot session cookies. Read here so it is validated/visible
+  // centrally even though secret-json.ts also reads process.env directly.
+  CAMPUX_BOT_SESSION_SECRET: z.string().optional(),
+  // Skip the automatic `prisma migrate deploy` on boot when "true"/"1".
+  CAMPUX_SKIP_AUTO_MIGRATE: z.string().optional(),
+  // Container Chromium path for QZone rendering, e.g. /usr/bin/chromium-browser.
+  PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: z.string().optional(),
+  // Build/release identifier baked into the Docker image by CI (branch-sha).
+  // Surfaces in anonymous telemetry so the fleet version distribution is known.
+  CAMPUX_BUILD_VERSION: z.string().optional(),
+  // Opt out of anonymous telemetry when "true"/"1". See docs/admin/telemetry.md
+  // for exactly what is reported.
+  CAMPUX_TELEMETRY_DISABLED: z.string().optional(),
+  // Central telemetry collector. Outside production the reporter only runs when
+  // this is set explicitly (so local dev instances never pollute fleet stats).
+  CAMPUX_TELEMETRY_ENDPOINT: z.string().optional(),
+  // Optional, voluntary instance label shown on the central dashboard. Leave
+  // unset to stay fully anonymous.
+  CAMPUX_TELEMETRY_INSTANCE_NAME: z.string().max(64).optional(),
+  // Optional official-service automation: when configured, newly-created walls
+  // get a slug-based subdomain and a Cloudflare CNAME record automatically.
+  CAMPUX_TENANT_DOMAIN_SUFFIX: z.string().optional(),
+  CAMPUX_TENANT_DOMAIN_TARGET: z.string().optional(),
+  CAMPUX_TENANT_DOMAIN_PROXIED: z.string().optional(),
+  CAMPUX_TENANT_DOMAIN_TTL: z.coerce.number().int().positive().max(86400).refine((ttl) => ttl === 1 || ttl >= 60).default(1),
+  CAMPUX_CLOUDFLARE_API_TOKEN: z.string().optional(),
+  CAMPUX_CLOUDFLARE_API_KEY: z.string().optional(),
+  CLOUDFLARE_API_TOKEN: z.string().optional(),
+  CLOUDFLARE_API_KEY: z.string().optional(),
+  CAMPUX_CLOUDFLARE_ZONE_ID: z.string().optional(),
+  CLOUDFLARE_ZONE_ID: z.string().optional(),
+  // QQ 频道机器人（personal_qq）接入配置。
+  // CAMPUX_PERSONAL_QQ_MCP_URL: 覆盖 QQ 开放平台 MCP 网关地址。默认
+  // https://graph.qq.com/mcp_gateway/open_platform_agent_mcp/mcp（一般无需设置）。
+  CAMPUX_PERSONAL_QQ_MCP_URL: z.string().default(""),
+});
+
+const DEFAULT_TELEMETRY_ENDPOINT = "https://dash.campux.top";
+
+function flagEnabled(value: string | undefined): boolean {
+  return value === "1" || value === "true";
+}
+
+export type CampuxConfig = ReturnType<typeof loadConfig>;
+
+function nonEmpty(value: string | undefined) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function parseBoolean(value: string | undefined, fallback: boolean) {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return fallback;
+  return ["1", "true", "yes", "on"].includes(normalized);
+}
+
+function loadDotEnvFiles() {
+  const candidates = [
+    resolve(process.cwd(), ".env"),
+    resolve(process.cwd(), "../.env"),
+    resolve(process.cwd(), "../../.env"),
+  ];
+
+  for (const file of candidates) {
+    if (!existsSync(file)) {
+      continue;
+    }
+
+    const content = readFileSync(file, "utf8");
+    for (const line of content.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) {
+        continue;
+      }
+
+      const separatorIndex = trimmed.indexOf("=");
+      if (separatorIndex < 0) {
+        continue;
+      }
+
+      const key = trimmed.slice(0, separatorIndex).trim();
+      const rawValue = trimmed.slice(separatorIndex + 1).trim();
+      if (!key || process.env[key] !== undefined) {
+        continue;
+      }
+
+      process.env[key] = rawValue.replace(/^"|"$/g, "");
+    }
+  }
+}
+
+export function loadConfig() {
+  loadDotEnvFiles();
+  const env = configSchema.parse(process.env);
+
+  // 数据库 provider 推断：与 @campux/db 的 resolveDbProvider 保持一致——
+  // 用「原始」DATABASE_URL（未走 zod 默认值），未设置/ file: / sqlite / .db → sqlite。
+  const rawDbUrl = (process.env.DATABASE_URL ?? "").trim().toLowerCase();
+  const dbProvider: "sqlite" | "postgresql" =
+    env.CAMPUX_DB_PROVIDER ??
+    (rawDbUrl === "" ||
+    rawDbUrl.startsWith("file:") ||
+    rawDbUrl.startsWith("sqlite:") ||
+    rawDbUrl.endsWith(".db") ||
+    rawDbUrl.endsWith(".sqlite")
+      ? "sqlite"
+      : "postgresql");
+
+  // 存储 driver 默认：显式 CAMPUX_STORAGE_DRIVER 优先；否则跟随 db provider
+  // （sqlite→local 零依赖；postgresql→s3 保持生产行为）。
+  const storageDriver: "s3" | "local" =
+    env.CAMPUX_STORAGE_DRIVER ?? (dbProvider === "sqlite" ? "local" : "s3");
+
+  return {
+    nodeEnv: env.NODE_ENV,
+    databaseUrl: env.DATABASE_URL,
+    dbProvider,
+    serverHost: env.CAMPUX_SERVER_HOST,
+    serverPort: env.CAMPUX_SERVER_PORT,
+    webOrigin: env.CAMPUX_WEB_ORIGIN,
+    webDistDir: env.CAMPUX_WEB_DIST_DIR,
+    s3: {
+      endpoint: env.S3_ENDPOINT,
+      region: env.S3_REGION,
+      bucket: env.S3_BUCKET,
+      accessKeyId: env.S3_ACCESS_KEY_ID,
+      secretAccessKey: env.S3_SECRET_ACCESS_KEY,
+      publicBaseUrl: env.S3_PUBLIC_BASE_URL,
+    },
+    storage: {
+      driver: storageDriver,
+      localDir: env.CAMPUX_STORAGE_LOCAL_DIR,
+    },
+    resend: {
+      apiKey: env.RESEND_API_KEY,
+      fromEmail: env.RESEND_FROM_EMAIL,
+    },
+    buildVersion: env.CAMPUX_BUILD_VERSION ?? "dev",
+    telemetry: {
+      disabled: flagEnabled(env.CAMPUX_TELEMETRY_DISABLED),
+      endpoint: env.CAMPUX_TELEMETRY_ENDPOINT ?? DEFAULT_TELEMETRY_ENDPOINT,
+      // Whether the operator pointed the reporter somewhere explicitly; gates
+      // reporting outside production (see resolveTelemetryTarget).
+      endpointExplicit: env.CAMPUX_TELEMETRY_ENDPOINT !== undefined,
+      instanceName: env.CAMPUX_TELEMETRY_INSTANCE_NAME,
+    },
+    tenantDomains: {
+      suffix: nonEmpty(env.CAMPUX_TENANT_DOMAIN_SUFFIX),
+      targetHost: nonEmpty(env.CAMPUX_TENANT_DOMAIN_TARGET),
+      proxied: parseBoolean(env.CAMPUX_TENANT_DOMAIN_PROXIED, true),
+      ttl: env.CAMPUX_TENANT_DOMAIN_TTL,
+      cloudflare: {
+        apiToken: nonEmpty(env.CAMPUX_CLOUDFLARE_API_TOKEN)
+          ?? nonEmpty(env.CLOUDFLARE_API_TOKEN)
+          ?? nonEmpty(env.CAMPUX_CLOUDFLARE_API_KEY)
+          ?? nonEmpty(env.CLOUDFLARE_API_KEY),
+        zoneId: nonEmpty(env.CAMPUX_CLOUDFLARE_ZONE_ID) ?? nonEmpty(env.CLOUDFLARE_ZONE_ID),
+      },
+    },
+    // QQ 频道机器人（personal_qq）专用配置。
+    personalQq: {
+      mcpUrl: env.CAMPUX_PERSONAL_QQ_MCP_URL.trim(),
+    },
+  };
+}

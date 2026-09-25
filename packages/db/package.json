@@ -1,0 +1,20 @@
+{
+  "name": "@campux/db",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./src/migrate": "./src/migrate.ts",
+    "./src/migrate-sqlite": "./src/migrate-sqlite.ts"
+  },
+  "scripts": {
+    "prisma": "prisma"
+  },
+  "dependencies": {
+    "@node-rs/argon2": "^2.0.2",
+    "@prisma/client": "^6.8.2"
+  },
+  "devDependencies": {
+    "prisma": "^6.8.2"
+  }
+}

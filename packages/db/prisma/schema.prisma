@@ -1,0 +1,691 @@
+generator client {
+  provider = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TenantStatus {
+  active
+  paused
+  archived
+}
+
+enum TenantRole {
+  submitter
+  reviewer
+  admin
+}
+
+enum SystemRole {
+  operations_admin
+  system_operator
+}
+
+enum PostStatus {
+  pending_approval
+  approved
+  rejected
+  cancelled
+  publishing
+  partially_failed
+  failed
+  published
+  pending_recall
+  recalled
+}
+
+enum PublishAttemptStatus {
+  queued
+  running
+  waiting_cookies
+  succeeded
+  failed
+  skipped
+}
+
+enum PublishBatchStatus {
+  collecting
+  publishing
+  published
+  partially_failed
+  failed
+}
+
+// 竞选状态机与稿件完全分离：待审核通过后才开始计时，进行中到点自动转结束。
+enum CampaignStatus {
+  pending_approval
+  rejected
+  running
+  ended
+  taken_down
+}
+
+model Tenant {
+  id             String             @id @default(uuid())
+  slug           String             @unique
+  host           String?            @unique
+  name           String
+  status         TenantStatus       @default(active)
+  themeColor     String             @default("#e0574f")
+  nextPostDisplayId Int                @default(1)
+  nextCampaignDisplayId Int            @default(1)
+  readyAt        DateTime?
+  archiveWarningAt DateTime?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  memberships    TenantMembership[]
+  sessions       AccountSession[]
+  metadata       TenantMetadata[]
+  oauthClients   OAuthClient[]
+  oauthAuthorizationCodes OAuthAuthorizationCode[]
+  oauthAccessTokens OAuthAccessToken[]
+  posts          Post[]
+  campaigns      Campaign[]
+  postTags       PostTag[]
+  botAccounts    BotAccount[]
+  publishTargets PublishTarget[]
+  auditLogs      AuditLog[]
+  aiSettings     TenantAiSettings?
+  qzoneVisitorSnapshots QZoneVisitorSnapshot[]
+  botFriendSnapshots BotFriendSnapshot[]
+  publishBatches PublishBatch[]
+  confessions    Confession[]
+}
+
+model User {
+  id          String             @id @default(uuid())
+  qqUin       BigInt             @unique
+  email       String?            @unique
+  displayName String?
+  passwordHash String
+  passwordChangeRequired Boolean @default(false)
+  autoFollowOwnPosts Boolean       @default(true)
+  isTestAccount Boolean           @default(false)
+  systemRole  SystemRole?
+  createdAt   DateTime           @default(now())
+  memberships TenantMembership[]
+  posts       Post[]
+  campaigns   Campaign[]
+  sessions    AccountSession[]
+  campaignVotes CampaignVote[]
+  oauthAuthorizationCodes OAuthAuthorizationCode[]
+  oauthAccessTokens OAuthAccessToken[]
+  auditLogs   AuditLog[]
+  postFollows PostFollow[]
+  oauthIdentities OAuthIdentity[]
+  confessionsSent Confession[] @relation("ConfessionFrom")
+  confessionsReceived Confession[] @relation("ConfessionTo")
+}
+
+// 第三方聚合登录绑定：把第三方平台的社交 UID 关联到本地账号。
+// provider 形如 "aggregate:qq"、"aggregate:wx" 等（第三方聚合登录的某种登录方式）。
+model OAuthIdentity {
+  id             String   @id @default(uuid())
+  userId         String
+  provider       String   // 形如 aggregate:qq / aggregate:wx
+  providerUserId String   // 第三方 social_uid
+  name           String?  // 第三方昵称快照
+  avatar         String?  // 第三方头像快照
+  createdAt      DateTime @default(now())
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerUserId])
+  @@index([userId])
+}
+
+model EmailVerificationCode {
+  id         String    @id @default(uuid())
+  email      String
+  codeHash   String
+  purpose    String
+  attempts   Int       @default(0)
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([email, purpose, createdAt])
+  @@index([expiresAt])
+}
+
+model SystemSetting {
+  key       String   @id
+  value     Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model AccountSession {
+  id               String   @id @default(uuid())
+  userId           String
+  tokenHash        String   @unique
+  selectedTenantId String?
+  expiresAt        DateTime
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  selectedTenant   Tenant?  @relation(fields: [selectedTenantId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model TenantMembership {
+  id        String     @id @default(uuid())
+  tenantId  String
+  userId    String
+  role      TenantRole @default(submitter)
+  createdAt DateTime   @default(now())
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, userId])
+  @@index([userId])
+}
+
+model TenantMetadata {
+  id        String   @id @default(uuid())
+  tenantId  String
+  key       String
+  value     Json
+  updatedAt DateTime @updatedAt
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, key])
+}
+
+model OAuthClient {
+  id                  String                    @id @default(uuid())
+  tenantId            String
+  clientId            String                    @unique
+  clientSecretHash    String?
+  name                String
+  description         String?
+  enabled             Boolean                   @default(true)
+  pkceRequired        Boolean                   @default(true)
+  redirectUris        Json                      @default("[]")
+  scopes              Json                      @default("[]")
+  createdAt           DateTime                  @default(now())
+  updatedAt           DateTime                  @updatedAt
+  tenant              Tenant                    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  authorizationCodes  OAuthAuthorizationCode[]
+  accessTokens        OAuthAccessToken[]
+
+  @@index([tenantId, enabled])
+  @@index([tenantId, name])
+}
+
+model OAuthAuthorizationCode {
+  id                  String      @id @default(uuid())
+  tenantId            String
+  clientId            String
+  userId              String
+  codeHash            String      @unique
+  redirectUri         String
+  scope               String
+  state               String?
+  codeChallenge       String?
+  codeChallengeMethod  String      @default("S256")
+  expiresAt           DateTime
+  consumedAt          DateTime?
+  createdAt           DateTime    @default(now())
+  tenant              Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  client              OAuthClient @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  user                User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, clientId, expiresAt])
+  @@index([userId, createdAt])
+}
+
+model OAuthAccessToken {
+  id                String      @id @default(uuid())
+  tenantId          String
+  clientId          String
+  userId            String
+  tokenHash         String      @unique
+  refreshTokenHash  String?     @unique
+  scope             String
+  expiresAt         DateTime
+  refreshExpiresAt  DateTime?
+  revokedAt         DateTime?
+  lastUsedAt        DateTime?
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+  tenant            Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  client            OAuthClient @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  user              User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, clientId, expiresAt])
+  @@index([userId, createdAt])
+}
+
+model Post {
+  id              String           @id @default(uuid())
+  tenantId        String
+  authorId        String
+  displayId       Int
+  legacyTenantSlug String?
+  legacyDisplayId Int?
+  legacyUuid      String?
+  text            String
+  attachments     Json             @default("[]")
+  anonymous       Boolean          @default(false)
+  anonymousAvatar String?
+  bgColor         String?
+  textColor       String?
+  font            String?
+  status          PostStatus       @default(pending_approval)
+  publishSummary  String?
+  recallIgnored   Boolean          @default(false)
+  recallIgnoredAt DateTime?
+  reviewQueueReminderSentAt DateTime?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  author          User             @relation(fields: [authorId], references: [id])
+  logs            PostLog[]
+  publishAttempts PublishAttempt[]
+  qzonePostMetrics QZonePostMetric[]
+  follows         PostFollow[]
+  tagAssignments  PostTagAssignment[]
+  batchItem       PublishBatchItem?
+
+  @@unique([tenantId, displayId])
+  @@unique([tenantId, legacyDisplayId])
+  @@index([tenantId, status, createdAt])
+  @@index([tenantId, status, reviewQueueReminderSentAt])
+}
+
+model PostTag {
+  id          String              @id @default(uuid())
+  tenantId    String
+  name        String
+  description String?
+  color       String              @default("#e2e8f0")
+  status      String              @default("active")
+  source      String              @default("llm")
+  lastUsedAt  DateTime?
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+  tenant      Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  assignments PostTagAssignment[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId, status, updatedAt])
+}
+
+model PostTagAssignment {
+  id         String   @id @default(uuid())
+  tenantId   String
+  postId     String
+  tagId      String
+  source     String   @default("llm")
+  confidence Float?
+  createdAt  DateTime @default(now())
+  post       Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  tag        PostTag  @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@unique([postId, tagId])
+  @@index([tenantId, tagId])
+  @@index([tenantId, postId])
+}
+
+model PostFollow {
+  id                     String   @id @default(uuid())
+  tenantId               String
+  postId                 String
+  userId                 String
+  lastPushedAt           DateTime?
+  lastPushedCommentCount Int      @default(0)
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+  post                   Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user                   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([postId, userId])
+  @@index([userId])
+  @@index([postId])
+}
+
+model PostLog {
+  id        String     @id @default(uuid())
+  tenantId  String
+  postId    String
+  actorId   String?
+  oldStatus PostStatus?
+  newStatus PostStatus
+  comment   String
+  createdAt DateTime   @default(now())
+  post      Post       @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, postId, createdAt])
+}
+
+model BotAccount {
+  id             String          @id @default(uuid())
+  tenantId       String
+  platform       String          @default("onebot")
+  qqUin          BigInt
+
+  // QQ 频道机器人（personal_qq）个人授权 token，加密 JSON 存储（形如 { token: "bot:..." }）。
+  personalQqToken Json?
+  displayName    String
+  enabled        Boolean         @default(true)
+  reviewGroupId  String?
+  reviewNotificationEnabled Boolean @default(false)
+  reviewQueueAutoReminderEnabled Boolean @default(false)
+  reviewQueueReminderThresholdHours Int @default(6)
+  reviewQueueReminderAtAll Boolean @default(false)
+  autoFriendRequestApprovalEnabled Boolean @default(false)
+  connectionToken String          @default(uuid())
+  publishTextTemplate Json        @default("{\"includePostId\":true,\"includeAuthorMention\":false,\"includeLinks\":false,\"customText\":\"\"}")
+  userMessageReply String         @default("首次私聊会自动注册 Campux 账号。\n发送 #投稿 开始投稿。\n忘记密码时，请发送 #重置密码 获取新密码。")
+  userMessageReplyCooldownSeconds Int @default(60)
+  reviewGroupMessageReply String   @default("审核命令：\n#通过 <稿件id>\n#拒绝 <理由> <稿件id>\n#重发 <稿件id>\n#登录 或 #刷新qzone cookies\n#扫码登录")
+  privateMessagesReceived Int    @default(0)
+  adminRepliesSent        Int    @default(0)
+  lastSeenAt     DateTime?
+  lastPublishStartedAt DateTime?
+  createdAt      DateTime        @default(now())
+  tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  publishTargets PublishTarget[]
+  sessions       BotSession[]
+  qzoneVisitorSnapshots QZoneVisitorSnapshot[]
+  friendSnapshots BotFriendSnapshot[]
+
+  @@unique([tenantId, qqUin])
+  @@unique([connectionToken])
+}
+
+model BotSession {
+  id           String     @id @default(uuid())
+  botAccountId String
+  type         String     @default("qzone")
+  domain       String     @default("user.qzone.qq.com")
+  cookies      Json
+  rawCookies   String?
+  refreshedAt  DateTime   @default(now())
+  expiresAt    DateTime?
+  healthStatus String     @default("unchecked")
+  healthCheckedAt DateTime?
+  healthMessage String?
+  healthFailureCount Int   @default(0)
+  healthInvalidNotifiedAt DateTime?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  botAccount   BotAccount @relation(fields: [botAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([botAccountId, type, domain])
+  @@index([botAccountId, refreshedAt])
+}
+
+model QZoneVisitorSnapshot {
+  id           String     @id @default(uuid())
+  tenantId     String
+  botAccountId String
+  sessionId    String?
+  date         DateTime
+  todayCount   Int
+  totalCount   Int
+  checkedAt    DateTime   @default(now())
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  tenant       Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  botAccount   BotAccount @relation(fields: [botAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([botAccountId, date])
+  @@index([tenantId, date])
+  @@index([botAccountId, checkedAt])
+}
+
+model BotFriendSnapshot {
+  id           String     @id @default(uuid())
+  tenantId     String
+  botAccountId String
+  date         DateTime
+  friendCount  Int
+  checkedAt    DateTime   @default(now())
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  tenant       Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  botAccount   BotAccount @relation(fields: [botAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([botAccountId, date])
+  @@index([tenantId, date])
+  @@index([botAccountId, checkedAt])
+}
+
+model PublishTarget {
+  id                  String           @id @default(uuid())
+  tenantId            String
+  botAccountId        String
+  type                String           @default("qzone")
+  displayName         String
+  enabled             Boolean          @default(true)
+  required            Boolean          @default(true)
+  publishDelaySeconds Int              @default(10)
+  failurePolicy       String           @default("block_post")
+  qzoneRefreshMode    String           @default("protocol")
+  tenant              Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  botAccount          BotAccount       @relation(fields: [botAccountId], references: [id], onDelete: Cascade)
+  attempts            PublishAttempt[]
+
+  @@index([tenantId, enabled])
+}
+
+model PublishAttempt {
+  id              String               @id @default(uuid())
+  tenantId        String
+  postId          String
+  publishTargetId String
+  batchId         String?
+  status          PublishAttemptStatus @default(queued)
+  attempt         Int                  @default(0)
+  lastError       String?
+  verbose         Json?
+  nextRunAt       DateTime?
+  externalId      String?
+  qzoneTid        String?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  post            Post                 @relation(fields: [postId], references: [id], onDelete: Cascade)
+  publishTarget   PublishTarget        @relation(fields: [publishTargetId], references: [id], onDelete: Cascade)
+  batch           PublishBatch?        @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  qzonePostMetrics QZonePostMetric[]
+
+  @@unique([postId, publishTargetId])
+  @@unique([batchId, publishTargetId])
+  @@index([tenantId, status, nextRunAt])
+  @@index([batchId])
+}
+
+model PublishBatch {
+  id            String             @id @default(uuid())
+  tenantId      String
+  status        PublishBatchStatus @default(collecting)
+  imageCount    Int                @default(0)
+  flushedAt     DateTime?
+  lastItemAt    DateTime?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+  tenant        Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  items         PublishBatchItem[]
+  attempts      PublishAttempt[]
+
+  @@index([tenantId, status, lastItemAt])
+}
+
+model PublishBatchItem {
+  id         String       @id @default(uuid())
+  batchId    String
+  postId     String
+  position   Int
+  imageCount Int
+  createdAt  DateTime     @default(now())
+  batch      PublishBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  post       Post         @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@unique([batchId, postId])
+  @@unique([postId])
+  @@index([batchId, position])
+}
+
+model QZonePostMetric {
+  id               String         @id @default(uuid())
+  tenantId         String
+  postId           String
+  publishAttemptId String         @unique
+  publishTargetId  String
+  botAccountId     String
+  qzoneTid         String
+  visitorCount     Int?
+  likeCount        Int?
+  commentCount     Int?
+  forwardCount     Int?
+  comments         Json?
+  lastError        String?
+  lastVerbose      Json?
+  checkedAt        DateTime?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  post             Post           @relation(fields: [postId], references: [id], onDelete: Cascade)
+  publishAttempt   PublishAttempt @relation(fields: [publishAttemptId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, postId])
+  @@index([tenantId, checkedAt])
+  @@index([botAccountId, checkedAt])
+}
+
+model BanRecord {
+  id         String   @id @default(uuid())
+  tenantId   String
+  userId     String
+  operatorId String?
+  comment    String
+  startsAt   DateTime @default(now())
+  endsAt     DateTime
+  createdAt  DateTime @default(now())
+
+  @@index([tenantId, userId, endsAt])
+  @@index([tenantId, endsAt])
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  tenantId   String?
+  actorId    String?
+  action     String
+  targetType String
+  targetId   String?
+  detail     Json?
+  createdAt  DateTime @default(now())
+  tenant     Tenant?  @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, createdAt])
+  @@index([actorId, createdAt])
+  @@index([action, createdAt])
+}
+
+// 投票竞选：独立于 Post 的租户级活动，编号（displayId）与稿件完全分开。
+model Campaign {
+  id                    String           @id @default(uuid())
+  tenantId              String
+  displayId             Int
+  authorId              String
+  title                 String
+  coverAttachment       Json?
+  anonymous             Boolean          @default(false)
+  votesPerPerson        Int              @default(1)
+  allowStackOnOption    Boolean          @default(false)
+  showVoterDetails      Boolean          @default(true)
+  durationHours         Int
+  status                CampaignStatus   @default(pending_approval)
+  adminOnly             Boolean          @default(false)
+  rejectReason          String?
+  startsAt              DateTime?
+  endsAt                DateTime?
+  takenDownAt           DateTime?
+  takenDownById         String?
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+  tenant                Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  author                User             @relation(fields: [authorId], references: [id])
+  options               CampaignOption[]
+  votes                 CampaignVote[]
+
+  @@unique([tenantId, displayId])
+  @@index([tenantId, status, endsAt])
+  @@index([tenantId, authorId, status])
+}
+
+model CampaignOption {
+  id                String     @id @default(uuid())
+  campaignId        String?
+  sortOrder         Int        @default(0)
+  label             String
+  imageAttachment   Json?
+  voteTotal         Int        @default(0)
+  createdAt         DateTime   @default(now())
+  campaign          Campaign?  @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  votes             CampaignVote[]
+
+  @@unique([campaignId, sortOrder])
+  @@index([campaignId])
+}
+
+model CampaignVote {
+  id          String   @id @default(uuid())
+  campaignId  String
+  optionId    String
+  voterId     String
+  count       Int
+  createdAt   DateTime @default(now())
+  campaign    Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  option      CampaignOption @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  voter       User?    @relation(fields: [voterId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, voterId, optionId])
+  @@index([campaignId, voterId])
+  @@index([optionId])
+}
+
+model TenantAiSettings {
+  id                         String   @id @default(uuid())
+  tenantId                   String   @unique
+  enabled                    Boolean  @default(true)
+  mode                       String   @default("local") // local | llm
+  provider                   String   @default("openai_compatible")
+  baseUrl                    String   @default("https://api.openai.com/v1")
+  model                      String   @default("gpt-4.1-mini")
+  apiKeySecret               Json?
+  temperature                Float    @default(0.2)
+  timeoutSeconds             Int      @default(30)
+  rules                      Json     @default("{}")
+  createdAt                  DateTime @default(now())
+  updatedAt                  DateTime @updatedAt
+  tenant                     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+}
+
+// 青青子衿：双向表白。单方表白只静默入库不通知，双方互相表白后才互相通知。
+model Confession {
+  id         String    @id @default(uuid())
+  tenantId   String
+  fromUserId String
+  toUserId   String
+  text       String
+  status     String    @default("pending") // pending | matched
+  matchedAt  DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  tenant     Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  fromUser   User      @relation("ConfessionFrom", fields: [fromUserId], references: [id], onDelete: Cascade)
+  toUser     User      @relation("ConfessionTo", fields: [toUserId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, fromUserId, toUserId, status])
+  @@index([tenantId, toUserId, status])
+  @@index([tenantId, createdAt])
+}

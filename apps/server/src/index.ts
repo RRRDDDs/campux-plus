@@ -1,0 +1,202 @@
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
+
+// Campux only operates in China. Pin the process timezone to Beijing (UTC+8) so
+// that every Date method (daily/hourly stats buckets, schedulers) resolves in
+// UTC+8 regardless of the host/container timezone. The Dockerfile also sets this
+// via ENV; this guards local/dev runs where TZ may be unset or UTC.
+if (!process.env.TZ) {
+  process.env.TZ = "Asia/Shanghai";
+}
+import Fastify from "fastify";
+import cors from "@fastify/cors";
+import fastifyMultipart from "@fastify/multipart";
+import fastifyStatic from "@fastify/static";
+import { loadConfig } from "@campux/config";
+import { createRuntimeQueue } from "./runtime/queue";
+import { OneBotRuntime } from "./runtime/onebot";
+import { recoverPublishAttempts, registerFailedPublishAttemptRepublisher, registerPublishingWorker } from "./runtime/publishing";
+import { registerQZonePostMetricScheduler, registerQZonePostMetricWorker } from "./runtime/qzone-post-metrics";
+import { registerBotFriendSnapshotScheduler } from "./runtime/bot-friend-snapshots";
+import { registerFollowedPostCommentScheduler } from "./runtime/followed-post-comments";
+import { registerBatchFlushSweeper, stopBatchFlushSweeper } from "./runtime/publish-batching";
+import { startCampaignScheduler } from "./runtime/campaign-scheduler";
+import { registerTelemetryReporter } from "./runtime/telemetry";
+import { prisma } from "./lib/prisma";
+import { registerAdminRoutes } from "./routes/admin";
+import { registerAiRoutes } from "./routes/ai";
+import { registerAuthRoutes } from "./routes/auth";
+import { registerBotRoutes } from "./routes/bot";
+import { registerHealthRoutes } from "./routes/health";
+import { registerMetadataRoutes } from "./routes/metadata";
+import { registerOAuthRoutes } from "./routes/oauth";
+import { registerAggregateOAuthRoutes } from "./routes/aggregate-oauth";
+import { registerOneBotRoutes } from "./routes/onebot";
+import { registerPostRoutes } from "./routes/posts";
+import { registerPostTagRoutes } from "./routes/post-tags";
+import { registerCampaignRoutes } from "./routes/campaigns";
+import { registerReviewRoutes } from "./routes/review";
+import { registerSetupRoutes } from "./routes/setup";
+import { registerStatsRoutes } from "./routes/stats";
+import { registerSvgRoutes } from "./routes/svg";
+import { registerSystemRoutes } from "./routes/system";
+import { registerTenantRoutes } from "./routes/tenants";
+import { registerPluginRoutes } from "./routes/plugins";
+import { registerConfessionRoutes } from "./routes/confessions";
+import { runDatabaseMigrations } from "./lib/migrations";
+import { registerQZoneCookieHeartbeat } from "./lib/qzone-cookies";
+import { registerTenantLifecycleScheduler } from "./runtime/tenant-lifecycle";
+import { registerPostTagMaintenanceScheduler } from "./runtime/post-tagging";
+import { ensureBotSessionSecretConfigured } from "./lib/secret-json";
+import { isTenantRuntimeActive } from "./lib/tenant-runtime";
+import { createPluginRegistry } from "@campux/plugin";
+import type { PluginQueue } from "@campux/plugin";
+import { reviewNotifyPlugin } from "@campux/plugin-review-notify";
+
+const config = loadConfig();
+ensureBotSessionSecretConfigured();
+const app = Fastify({
+  logger: {
+    level: config.nodeEnv === "production" ? "info" : "debug",
+  },
+  bodyLimit: 500 * 1024 * 1024,
+});
+await runDatabaseMigrations(app.log);
+
+await app.register(cors, {
+  origin: config.webOrigin,
+  credentials: true,
+});
+await app.register(fastifyMultipart, {
+  limits: { fileSize: 500 * 1024 * 1024, files: 9, fields: 10 },
+});
+
+const queue = createRuntimeQueue({
+  logger: app.log,
+  canRunTenantJob: (job) => isTenantRuntimeActive(prisma, job.tenantId),
+});
+
+// ─── 插件系统 ───────────────────────────────────────────
+// 将 RuntimeQueue 适配为 PluginQueue 接口
+const pluginQueue: PluginQueue = {
+  registerWorker(name: string, handler: () => Promise<void>, intervalMs: number) {
+    const timer = setInterval(() => {
+      handler().catch((err) => app.log.error(`[plugin-worker:${name}] error:`, err));
+    }, intervalMs);
+    timer.unref(); // 不阻止进程退出
+    app.log.info(`[plugin] registered worker "${name}" every ${intervalMs}ms`);
+    app.addHook("onClose", () => clearInterval(timer));
+  },
+};
+
+const pluginRegistry = createPluginRegistry(app, config, prisma, pluginQueue);
+
+// 注册内置插件（只有 reviewNotifyPlugin 等真正的 CampuxPlugin）。
+// 租户级预设插件（Markdown 渲染 / 多彩投稿 / 字体选择 / 匿名头像 / Bot 多彩消息）
+// 已经存在 tenant_metadata.plugin_config 里，不作为 CampuxPlugin 实例注册；
+// 「已启用」状态由 plugin_config.*.enabled 直接驱动。
+pluginRegistry.register(reviewNotifyPlugin);
+
+// 初始化所有插件（路由注册前）
+await pluginRegistry.initAll();
+
+// 将事件总线挂载到 Fastify 实例上，供路由层使用
+app.decorate("pluginEvents", pluginRegistry.getEventBus());
+
+const oneBot = new OneBotRuntime(queue, app.log, config, pluginRegistry.getEventBus());
+registerPublishingWorker(queue, app.log, config, oneBot);
+registerQZonePostMetricWorker(queue, app.log);
+
+await registerOneBotRoutes(app, oneBot);
+registerHealthRoutes(app, queue);
+registerSetupRoutes(app);
+registerAuthRoutes(app, config);
+registerAggregateOAuthRoutes(app, config);
+registerTenantRoutes(app);
+registerMetadataRoutes(app, config);
+registerAiRoutes(app);
+registerOAuthRoutes(app);
+registerAdminRoutes(app, queue, oneBot);
+registerBotRoutes(app, queue);
+registerPostRoutes(app, config, queue, oneBot);
+registerPostTagRoutes(app);
+registerCampaignRoutes(app, config, oneBot);
+registerConfessionRoutes(app, oneBot);
+registerReviewRoutes(app, queue, oneBot);
+registerSvgRoutes(app);
+registerStatsRoutes(app);
+registerSystemRoutes(app, queue, config, oneBot);
+registerPluginRoutes(app, pluginRegistry);
+
+// 通知所有插件路由已注册完毕
+await pluginRegistry.readyAll();
+
+// Campux walls/console are private operating tools, not public content — keep
+// every host (app/admin/<wall>.campux.top) out of search engines. Served before
+// the SPA fallback so crawlers get a real robots.txt instead of the app shell.
+app.get("/robots.txt", async (_request, reply) => {
+  return reply
+    .header("content-type", "text/plain; charset=utf-8")
+    .send("User-agent: *\nDisallow: /\n");
+});
+
+const webDistDir = resolve(process.cwd(), config.webDistDir);
+if (existsSync(webDistDir)) {
+  await app.register(fastifyStatic, {
+    root: webDistDir,
+    prefix: "/",
+    wildcard: false,
+  });
+
+  app.setNotFoundHandler((request, reply) => {
+    if (request.method === "GET" && !request.url.startsWith("/api") && !request.url.startsWith("/onebot")) {
+      return reply.sendFile("index.html");
+    }
+    return reply.code(404).send({ message: "Not Found" });
+  });
+}
+
+app.addHook("onClose", async () => {
+  oneBot.close();
+  await queue.stop();
+  await pluginRegistry.closeAll();
+  await prisma.$disconnect();
+});
+
+await queue.start();
+await recoverPublishAttempts(queue, app.log);
+const stopQZoneCookieHeartbeat = registerQZoneCookieHeartbeat(app.log, oneBot);
+const stopTenantLifecycleScheduler = registerTenantLifecycleScheduler({
+  logger: app.log,
+  config,
+  onTenantDeactivating: (tenantId) => {
+    oneBot.disconnectTenant(tenantId);
+    return () => oneBot.activateTenant(tenantId);
+  },
+});
+const stopQZonePostMetricScheduler = registerQZonePostMetricScheduler({ queue, logger: app.log });
+const stopBotFriendSnapshotScheduler = registerBotFriendSnapshotScheduler({ caller: oneBot, logger: app.log });
+const stopFollowedPostCommentScheduler = registerFollowedPostCommentScheduler({ caller: oneBot, logger: app.log });
+const stopPostTagMaintenanceScheduler = registerPostTagMaintenanceScheduler({ logger: app.log });
+const stopTelemetryReporter = registerTelemetryReporter({ logger: app.log, config });
+const stopFailedPublishAttemptRepublisher = registerFailedPublishAttemptRepublisher(queue, app.log);
+registerBatchFlushSweeper(queue, app.log);
+const stopCampaignScheduler = startCampaignScheduler();
+
+app.addHook("onClose", async () => {
+  stopQZoneCookieHeartbeat();
+  stopTenantLifecycleScheduler();
+  stopQZonePostMetricScheduler();
+  stopBotFriendSnapshotScheduler();
+  stopFollowedPostCommentScheduler();
+  stopPostTagMaintenanceScheduler();
+  stopTelemetryReporter();
+  stopFailedPublishAttemptRepublisher();
+  stopBatchFlushSweeper();
+  stopCampaignScheduler();
+});
+
+await app.listen({
+  host: config.serverHost,
+  port: config.serverPort,
+});

@@ -1,0 +1,31 @@
+Campux Plus
+Copyright 2026 Campux Plus contributors
+
+本作品基于 Campux 修改而成。
+This product includes software developed as part of Campux
+(https://github.com/idoknow/Campux), licensed under the Apache License 2.0.
+
+上游项目：Campux — 开源校园墙运营系统（作者 idoknow 及贡献者）
+上游仓库：https://github.com/idoknow/Campux
+本仓库基于的上游提交：4f1bfaf827184551fb15052957c4ca649fe7cb47
+
+根据 Apache License 2.0 第 4 条，特此声明本仓库对上游代码做出了修改，主要修改如下：
+
+1. 新增「投稿 AI 自动审核」：新投稿自动交给大模型初审，低风险自动通过、
+   明确违规自动拒绝、不确定的保持人工审核；审核口径（墙规）与阈值可在后台配置。
+   涉及文件：apps/server/src/runtime/ai-review.ts（新增）、ai-settings.ts、
+   routes/ai.ts、routes/posts.ts、runtime/onebot.ts、
+   apps/web/src/features/admin/AdminPage.tsx、packages/domain/src/index.ts。
+
+2. 新增「青青子衿，悠悠我心」双向表白：双方互相表白后才互相通知，
+   单方表白只静默入库；含网页入口、管理员配置与记录查看、可选的 AI 内容过滤。
+   涉及文件：apps/server/src/lib/confession.ts（新增）、routes/confessions.ts（新增）、
+   packages/db/prisma/schema.prisma 与 migrations/20260924200000_add_confessions（新增）、
+   apps/web/src/features/confession/ConfessionsPage.tsx（新增）等。
+
+3. 新增仓库内文档：README.md、DEPLOY.md、CHANGES.md、NOTICE（本文件）。
+
+4. 移除了上游面向官方发布流程的 .github/workflows 与 .github/actions，
+   避免在个人仓库中产生无意义的失败任务。
+
+除上述修改外，代码、文档与素材均来自上游项目，版权归原作者及贡献者所有。

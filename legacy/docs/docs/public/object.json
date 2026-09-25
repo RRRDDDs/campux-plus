@@ -1,0 +1,23 @@
+{
+    "announcement": {
+        "admin": [
+            {
+                "id": 0,
+                "title": "⭐公告",
+                "content": "我们正收集反馈以改进 Campux",
+                "link": {
+                    "url": "https://www.wjx.cn/vm/tUPMYXG.aspx#",
+                    "text": "请填写问卷"
+                },
+                "created_at_ts": 1729610647,
+                "versions": [
+                    "v1.0.0"
+                ],
+                "color": {
+                    "text": "#fff",
+                    "background": "#d77"
+                }
+            }
+        ]
+    }
+}

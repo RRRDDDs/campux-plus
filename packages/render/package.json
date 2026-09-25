@@ -1,0 +1,13 @@
+{
+  "name": "@campux/render",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@campux/domain": "workspace:*",
+    "marked": "^15.0.0",
+    "playwright-core": "^1.60.0"
+  }
+}

@@ -1,0 +1,926 @@
+import type { TenantSummary } from "@campux/domain";
+
+export type MainTab = "post" | "posts" | "confession" | "stats" | "services" | "admin";
+
+export type ConfessionLimits = {
+  /** 每人每天最多可发送的表白条数，0 表示不限 */
+  dailyLimitPerUser: number;
+  /** 单条表白正文最大长度 */
+  maxTextLength: number;
+  /** 是否先用大模型过滤表白正文 */
+  aiScreenEnabled: boolean;
+  /** 是否允许网页端发起表白 */
+  allowWebSubmit: boolean;
+};
+
+export type ConfessionItem = {
+  id: string;
+  status: "pending" | "matched";
+  text: string;
+  createdAt: string;
+  matchedAt: string | null;
+  partnerQqUin: string;
+  partnerDisplayName: string | null;
+  /** 仅互相表白后返回：对方写给自己的原话 */
+  partnerText: string | null;
+};
+
+export type ConfessionOverview = {
+  enabled: boolean;
+  limits: ConfessionLimits;
+  usedToday: number;
+  myQqUin: string;
+  items: ConfessionItem[];
+};
+export type PostsTab = "mine" | "review" | "published";
+export type AdminTab = "users" | "bans" | "metadata" | "bots" | "publish" | "pluginConfig";
+export type TenantRole = "submitter" | "reviewer" | "admin";
+export type SystemRole = "operations_admin" | "system_operator";
+
+export type OAuthServerSettings = {
+  enabled: boolean;
+  authorizationCodeTtlMinutes: number;
+  accessTokenTtlMinutes: number;
+  refreshTokenTtlDays: number;
+  pkceRequired: boolean;
+  allowPlainPkce: boolean;
+  stateKey?: string | null;
+};
+
+export type OAuthClientItem = {
+  id: string;
+  tenantId: string;
+  clientId: string;
+  name: string;
+  description: string | null;
+  enabled: boolean;
+  pkceRequired: boolean;
+  redirectUris: string[];
+  scopes: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type OAuthClientSecretResponse = {
+  client: OAuthClientItem;
+  clientSecret: string;
+};
+
+export type OAuthAuthorizeClientResponse = {
+  client: OAuthClientItem;
+  settings: OAuthServerSettings;
+  tenant: {
+    id: string;
+    name: string;
+    slug: string;
+  };
+};
+
+export type OAuthClientSettingsResponse = {
+  settings: OAuthServerSettings;
+};
+
+export type Pagination = {
+  page: number;
+  limit: number;
+  total: number;
+  pageCount: number;
+};
+
+export type Membership = {
+  id: string;
+  role: TenantRole;
+  tenant: TenantSummary;
+};
+
+export type CurrentMembership = {
+  id: string;
+  role: TenantRole;
+};
+
+export type ActiveBan = {
+  id: string;
+  comment: string;
+  startsAt: string;
+  endsAt: string;
+  createdAt: string;
+};
+
+export type MeResponse =
+  | { authenticated: false }
+  | {
+      authenticated: true;
+      user: {
+        id: string;
+        qqUin: string;
+        email: string | null;
+        displayName: string | null;
+        systemRole: SystemRole | null;
+        passwordChangeRequired: boolean;
+        autoFollowOwnPosts: boolean;
+      };
+      memberships: Membership[];
+      systemAccessibleTenants?: TenantSummary[];
+      currentTenant: TenantSummary | null;
+      currentMembership: CurrentMembership | null;
+      activeBan: ActiveBan | null;
+      needsTenantSelection: boolean;
+      hostLocked: boolean;
+    };
+
+export type AuthenticatedMe = Extract<MeResponse, { authenticated: true }>;
+export type TenantMetadata = {
+  brand: string;
+  banner: string;
+  logoUrl: string;
+  postRules: string[];
+  pendingPostLimit: number;
+  services: Array<{
+    title: string;
+    description?: string;
+    url?: string;
+  }>;
+  imageCompression: {
+    enabled: boolean;
+    quality: number;
+    maxDimension: number;
+  };
+  imageMaxSizeMb: number;
+  publishMode: "single" | "accumulate";
+  publishAccumulate: {
+    minImages: number;
+    maxImages: number;
+    staleMinutes: number;
+  };
+  publishLlmSummaryEnabled: boolean;
+  botStylishMessagesEnabled: boolean;
+  botPrivatePostStylishEnabled: boolean;
+  enableColorSelection: boolean;
+  enableMarkdownRender: boolean;
+  enableFontSelection: boolean;
+  enableAnonymousAvatarSelection: boolean;
+  /** 字体选择插件启用的字体 value 白名单（包含 "default"） */
+  availableFonts: string[];
+  /** 多彩投稿插件启用的背景色预设（未配置时为空数组，投稿页不展示背景色选项） */
+  availableBgColors: PluginColorPreset[];
+  /** 多彩投稿插件启用的文字色预设（未配置时为空数组，投稿页不展示文字色选项） */
+  availableTextColors: PluginColorPreset[];
+  /** 匿名头像插件配置的头像池：id 为持久标识符，svg 为 data URL（内置头像由服务端解析） */
+  availableAvatars: Array<{ id: string; svg: string; label: string }>;
+  /** 投票竞选插件是否启用；关闭时投稿胶囊与服务页入口全部隐藏 */
+  enableCampaigns: boolean;
+  /** 投票竞选插件是否允许匿名发起；插件关闭时为 false */
+  allowAnonymousCampaign: boolean;
+  /** 每个用户最多同时进行的竞选数（待审核 + 进行中）；插件关闭时为 0 */
+  maxActiveCampaignsPerUser: number;
+  /** 青青子衿表白插件是否启用；关闭时底部「表白」入口隐藏 */
+  enableConfessions: boolean;
+  /** 聚合登录插件是否启用；关闭时服务页「第三方登录」入口隐藏 */
+  enableAggregateLogin: boolean;
+};
+
+export type BotMessageTypeConfig = {
+  type: string;
+  label: string;
+  enabled: boolean;
+  messages: string[];
+};
+
+export type PluginColorPreset = {
+  value: string;
+  label: string;
+  hex: string;
+};
+
+export type PluginFontOption = {
+  value: string;
+  enabled: boolean;
+};
+
+export type PluginSvgAvatarItem = {
+  /** 稳定标识符：内置头像为文件名；自定义头像为短 hash */
+  id: string;
+  /** 自定义 SVG data URL（data:image/svg+xml;base64,...）；仅自定义头像使用 */
+  svg?: string | undefined;
+};
+
+export type TenantPluginConfig = {
+  markdownRender: {
+    enabled: boolean;
+  };
+  colorSelection: {
+    enabled: boolean;
+    backgroundColors: PluginColorPreset[];
+    textColors: PluginColorPreset[];
+  };
+  fontSelection: {
+    enabled: boolean;
+    fonts: PluginFontOption[];
+  };
+  anonymousAvatar: {
+    enabled: boolean;
+    items: PluginSvgAvatarItem[];
+  };
+  botStylishMessages: {
+    enabled: boolean;
+    messageTypes: BotMessageTypeConfig[];
+  };
+  campaigns: {
+    enabled: boolean;
+    /** 是否允许匿名发起竞选 */
+    allowAnonymousCreate: boolean;
+    /** 每个用户最多同时在进行的竞选数（待审核 + 进行中），默认 1 */
+    maxActivePerUser: number;
+  };
+  confessions: {
+    enabled: boolean;
+    /** 每人每天最多可发送的表白条数，0 表示不限 */
+    dailyLimitPerUser: number;
+    /** 单条表白正文最大长度 */
+    maxTextLength: number;
+    /** 是否先用大模型过滤表白正文 */
+    aiScreenEnabled: boolean;
+    /** 是否允许网页端发起表白 */
+    allowWebSubmit: boolean;
+  };
+  aggregateLogin: {
+    enabled: boolean;
+    /** 公开给登录页的第三方登录方式白名单 */
+    loginTypes: string[];
+    appId: string;
+    appKey: string;
+    endpoint: string;
+  };
+};
+export type PostAttachment = {
+  kind: "image";
+  key: string;
+  url: string;
+  fileName: string;
+  contentType?: string;
+  size?: number;
+  width?: number;
+  height?: number;
+};
+
+export type PendingAttachment = {
+  id: string;
+  file: File;
+  blobUrl: string;
+  kind: "image";
+  sortOrder: number;
+  progress: number;
+  status: "ready" | "converting" | "uploading" | "failed";
+  errorMessage?: string;
+  /** Original video file before GIF conversion (if attachment started as video) */
+  originalVideo: File | undefined;
+  /** Remote GIF URL returned by the validated server-side converter. */
+  remoteGifUrl?: string;
+  /** Short-lived server claim authorizing the converted GIF URL. */
+  remoteGifProof?: string;
+};
+
+export type PostItem = {
+  id: string;
+  displayId: number;
+  title: string;
+  text: string;
+  attachments: unknown;
+  anonymous: boolean;
+  anonymousAvatar: string | null;
+  bgColor: string | null;
+  textColor: string | null;
+  font: string | null;
+  status: string;
+  recallIgnored: boolean;
+  recallIgnoredAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  recallReason: string | null;
+  following?: boolean;
+  submissionChannel: "web" | "private";
+  qzoneStats: {
+    visitorCount: number | null;
+    likeCount: number | null;
+    commentCount: number | null;
+    forwardCount: number | null;
+    checkedAt: string | null;
+    targets: Array<{
+      targetName: string;
+      botName: string | null;
+      botQqUin: string | null;
+      qzoneTid: string;
+      visitorCount: number | null;
+      likeCount: number | null;
+      commentCount: number | null;
+      forwardCount: number | null;
+      checkedAt: string | null;
+      lastError: string | null;
+      comments?: Array<{
+        uin: string;
+        name: string;
+        content: string;
+        images?: string[];
+        createdAt: string | null;
+        replies?: Array<{ uin: string; name: string; content: string; images?: string[]; createdAt: string | null }>;
+      }>;
+    }>;
+    logs: Array<{
+      targetName: string;
+      botName: string | null;
+      botQqUin: string | null;
+      qzoneTid: string;
+      message: string;
+      checkedAt: string | null;
+    }>;
+  } | null;
+  batch?: {
+    postCount: number;
+    displayIds: number[];
+    otherDisplayIds: number[];
+    collecting: boolean;
+  } | null;
+  tags: AssignedPostTag[];
+};
+
+export type PostTimelineEntry = {
+  actorId: string | null;
+  actorName: string | null;
+  actorQq: string | null;
+  oldStatus: string | null;
+  newStatus: string;
+  comment: string;
+  createdAt: string;
+};
+
+export type ReviewPostItem = PostItem & {
+  author: {
+    id: string;
+    qqUin: string;
+    displayName: string | null;
+  } | null;
+  timeline?: PostTimelineEntry[];
+};
+
+export type PublishedFeedAuthor = {
+  displayName: string;
+  qqUin: string;
+} | null;
+
+export type PublishedFeedPost = {
+  id: string;
+  displayId: number;
+  text: string;
+  attachments: unknown;
+  anonymous: boolean;
+  author: PublishedFeedAuthor;
+  bgColor: string | null;
+  textColor: string | null;
+  font: string | null;
+  createdAt: string;
+  tags: AssignedPostTag[];
+};
+
+export type PublishedFeedItem = {
+  kind: "single" | "batch";
+  key: string;
+  publishedAt: string;
+  posts: PublishedFeedPost[];
+  qzoneStats: PostItem["qzoneStats"];
+};
+
+export type AdminMember = {
+  id: string;
+  role: TenantRole;
+  createdAt: string;
+  user: {
+    id: string;
+    qqUin: string;
+    displayName: string | null;
+    systemRole: string | null;
+  };
+};
+
+export type AdminMemberDetail = {
+  member: AdminMember;
+  stats: {
+    postsTotal: number;
+    postsByStatus: Record<string, number>;
+    activeBanCount: number;
+  };
+  posts: Array<{
+    id: string;
+    displayId: number;
+    text: string;
+    anonymous: boolean;
+    status: string;
+    imageCount: number;
+    createdAt: string;
+    updatedAt: string;
+  }>;
+  bans: Array<{
+    id: string;
+    comment: string;
+    startsAt: string;
+    endsAt: string;
+    createdAt: string;
+    active: boolean;
+    operator: {
+      id: string;
+      qqUin: string;
+      displayName: string | null;
+    } | null;
+  }>;
+};
+
+export type PublishTargetItem = {
+  id: string;
+  type: string;
+  displayName: string;
+  enabled: boolean;
+  required: boolean;
+  publishDelaySeconds: number;
+  failurePolicy: string;
+  qzoneRefreshMode: "protocol" | "qr";
+  botAccount: {
+    id: string;
+    platform: "onebot" | "personal_qq";
+    qqUin: string;
+    displayName: string;
+    enabled: boolean;
+    connectionToken: string;
+    publishTextTemplate: PublishTextTemplate;
+    qzoneSession: AdminBotSession | null;
+  };
+};
+
+export type PublishAttemptItem = {
+  id: string;
+  status: string;
+  attempt: number;
+  lastError: string | null;
+  nextRunAt: string | null;
+  externalId: string | null;
+  qzoneTid: string | null;
+  verbose: PublishAttemptVerbose | null;
+  updatedAt: string;
+  platform: "onebot" | "personal_qq" | string;
+  destinationLabel: string;
+  destinationId: string | null;
+  externalIdLabel: string;
+  qzoneTidLabel: string;
+  post: {
+    id: string;
+    displayId: number;
+    text: string;
+    anonymous: boolean;
+    status: string;
+    author: {
+      qqUin: string;
+      displayName: string | null;
+    };
+  };
+  publishTarget: {
+    id: string;
+    displayName: string;
+    required: boolean;
+    botAccount: {
+      platform: "onebot" | "personal_qq" | string;
+      qqUin: string;
+      reviewGroupId: string | null;
+      displayName: string;
+    };
+  };
+};
+
+export type PublishAttemptVerbose = {
+  mode?: string;
+  appId?: string | null;
+  guildId?: string | null;
+  channelId?: string | null;
+  feedId?: string | null;
+  shareUrl?: string | null;
+  title?: string | null;
+  contentLength?: number;
+  targetName?: string;
+  renderedBytes?: number;
+  imageCount?: number;
+  renderedImageIncluded?: boolean;
+  cookieStatus?: string;
+  cookieNames?: string[];
+  uin?: string | null;
+  qzoneTid?: string | null;
+  publishedAt?: string | null;
+  note?: string;
+  http?: Array<{
+    label: string;
+    durationMs?: number;
+    request: {
+      method: string;
+      url: string;
+      headers?: Record<string, string>;
+      body?: Record<string, string>;
+    };
+    response?: {
+      status: number;
+      statusText: string;
+      headers?: Record<string, string>;
+      body: string;
+      parsed?: unknown;
+    };
+    error?: string;
+  }>;
+  [key: string]: unknown;
+};
+
+export type AdminBotAccount = {
+  id: string;
+  platform: "onebot" | "personal_qq";
+  qqUin: string;
+  personalQqTokenConfigured: boolean;
+  personalQqToken?: string;
+  displayName: string;
+  enabled: boolean;
+  reviewGroupId: string | null;
+  reviewNotificationEnabled: boolean;
+  reviewQueueAutoReminderEnabled: boolean;
+  reviewQueueReminderThresholdHours: number;
+  reviewQueueReminderAtAll: boolean;
+  autoFriendRequestApprovalEnabled: boolean;
+  connectionToken: string;
+  publishTextTemplate: PublishTextTemplate;
+  userMessageReply: string;
+  userMessageReplyCooldownSeconds: number;
+  reviewGroupMessageReply: string;
+  lastSeenAt: string | null;
+  createdAt: string;
+  connection: {
+    online: boolean;
+    connectionCount: number;
+  };
+  sessions: Array<{
+    id: string;
+    type: string;
+    domain: string;
+    refreshedAt: string;
+    expiresAt: string | null;
+    status: "unchecked" | "available" | "invalid" | "expired";
+    checkedAt: string | null;
+    message: string | null;
+  }>;
+  publishTargets: Array<{
+    id: string;
+    type: string;
+    displayName: string;
+    enabled: boolean;
+    required: boolean;
+  }>;
+};
+
+export type AiRules = {
+  /** 是否启用私聊投稿 AI 语义收稿 */
+  privatePostAiEnabled?: boolean;
+  /** 是否启用投稿后的 LLM 自动打标 */
+  postTaggingEnabled?: boolean;
+    /** 是否启用 LLM 定期维护标签库 */
+    postTagMaintenanceEnabled?: boolean;
+    /** 是否启用投稿 AI 初审（自动通过低风险稿件，可自动拒绝明确违规稿件） */
+    postReviewEnabled?: boolean;
+    /** 低风险且置信度达标时是否自动通过 */
+    postReviewAutoApprove?: boolean;
+    /** 明确违规且置信度达标时是否自动拒绝 */
+    postReviewAutoReject?: boolean;
+    /** 自动通过所需最低置信度 */
+    postReviewAutoApproveThreshold?: number;
+    /** 自动拒绝所需最低置信度 */
+    postReviewAutoRejectThreshold?: number;
+    /** 每日 AI 自动通过上限，0 表示不限 */
+    postReviewDailyLimit?: number;
+    /** 初审墙规文本，留空使用内置默认墙规 */
+    postReviewRules?: string;
+    /** 私聊 AI 聚合收稿等待秒数，0 表示不聚合 */
+  privatePostAggregateDelaySeconds?: number;
+  /** 对话投稿额外触发关键词，如 ["发帖", "吐槽", "表白"] */
+  postTriggerKeywords?: string[];
+  /** 私聊投稿 AI 语义收稿的完整系统提示词，留空使用内置默认提示词 */
+  privatePostPrompt?: string;
+};
+
+export type PostTag = {
+  id: string;
+  name: string;
+  description: string | null;
+  color: string;
+  status: string;
+  source: string;
+  lastUsedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  postCount?: number;
+};
+
+export type AssignedPostTag = PostTag & {
+  assignmentSource: string;
+  confidence: number | null;
+};
+
+export type TenantAiSettings = {
+  enabled: boolean;
+  mode: "local" | "llm";
+  provider: string;
+  baseUrl: string;
+  model: string;
+  apiKeyConfigured: boolean;
+  temperature: number;
+  timeoutSeconds: number;
+  rules: AiRules;
+};
+
+export type PublishTextTemplate = {
+  customText: string;
+  suffixText: string;
+  includePostId: boolean;
+  includeAuthorMention: boolean;
+  includeLinks: boolean;
+  includeQZoneLink: boolean;
+  qzoneLinkBotAccountId: string;
+};
+
+export type AdminBotSession = AdminBotAccount["sessions"][number];
+
+export type AdminBotEvent = {
+  id: string;
+  action: string;
+  targetType: string;
+  targetId: string | null;
+  detail: unknown;
+  createdAt: string;
+  actor: {
+    id: string;
+    qqUin: string;
+    displayName: string | null;
+  } | null;
+};
+
+export type TenantStats = {
+  generatedAt: string;
+  range: {
+    days: number;
+    since: string;
+    until: string;
+  };
+  overview: {
+    totalPosts: number;
+    recent7Posts: number;
+    recent30Posts: number;
+    uniqueAuthors: number;
+    activeAuthors30d: number;
+    anonymousPosts: number;
+    anonymousRate: number | null;
+    postsWithImages: number;
+    imageRate: number | null;
+    imagesTotal: number;
+    avgImagesPerPost: number | null;
+    avgReviewMinutes: number | null;
+  };
+  posts: {
+    totalPosts: number;
+    byStatus: Record<string, number>;
+    bySource: {
+      private: number;
+      web: number;
+    };
+    anonymousPosts: number;
+    anonymousRate: number | null;
+    postsWithImages: number;
+    imageRate: number | null;
+    imagesTotal: number;
+    avgImagesPerPost: number | null;
+    daily: Array<{ date: string; total: number; approved: number; rejected: number; published: number }>;
+    userDaily: Array<{ date: string; newMembers: number; totalMembers: number }>;
+    hourly: Array<{ hour: number; total: number }>;
+    topAuthors30d: Array<{
+      authorId: string;
+      count: number;
+      user: {
+        id: string;
+        qqUin: string;
+        displayName: string | null;
+      } | null;
+    }>;
+  };
+  review: {
+    reviewed30d: number;
+    approved30d: number;
+    rejected30d: number;
+    avgReviewMinutes: number | null;
+  };
+  publishing: {
+    byStatus: Record<string, number>;
+    successRate: number | null;
+    targets: Array<{
+      id: string;
+      displayName: string;
+      enabled: boolean;
+      required: boolean;
+      delaySeconds: number;
+      bot: {
+        qqUin: string;
+        displayName: string;
+      };
+      counts: Record<string, number>;
+      successRate: number | null;
+    }>;
+    recentFailures: Array<{
+      id: string;
+      postDisplayId: number;
+      postText: string;
+      postStatus: string;
+      targetName: string;
+      botName: string;
+      botQqUin: string;
+      lastError: string | null;
+      updatedAt: string;
+    }>;
+  };
+  members: {
+    byRole: Record<string, number>;
+    total: number;
+    activeBans: number;
+    totalBans: number;
+  };
+  qzoneVisitors: {
+    daily: Array<{ date: string; todayCount: number; totalCount: number }>;
+    targets: Array<{
+      id: string;
+      displayName: string;
+      bot: {
+        displayName: string;
+        qqUin: string;
+      };
+      daily: Array<{ date: string; todayCount: number; totalCount: number }>;
+    }>;
+  };
+  botFriends: {
+    daily: Array<{ date: string; friendCount: number }>;
+    bots: Array<{
+      botAccountId: string;
+      bot: {
+        displayName: string;
+        qqUin: string;
+      };
+      daily: Array<{ date: string; friendCount: number }>;
+    }>;
+  };
+  bots: Array<{
+    id: string;
+    qqUin: string;
+    displayName: string;
+    enabled: boolean;
+    reviewGroupId: string | null;
+    publishTargetCount: number;
+    lastSeenAt: string | null;
+    qzoneSession: {
+      status: string;
+      checkedAt: string | null;
+      message: string | null;
+      refreshedAt: string;
+    } | null;
+  }>;
+  audit: {
+    actions30d: Array<{ action: string; count: number }>;
+  };
+};
+
+export type AdminBanRecord = {
+  id: string;
+  comment: string;
+  startsAt: string;
+  endsAt: string;
+  createdAt: string;
+  active: boolean;
+  user: {
+    id: string;
+    qqUin: string;
+    displayName: string | null;
+  } | null;
+  operator: {
+    id: string;
+    qqUin: string;
+    displayName: string | null;
+  } | null;
+};
+
+export type TenantStatus = "active" | "paused" | "archived";
+
+export type SystemTenant = {
+  id: string;
+  slug: string;
+  host: string | null;
+  name: string;
+  status: TenantStatus;
+  ready: boolean;
+  readyAt: string | null;
+  archiveWarningAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  botAccountCount: number;
+  postCount: number;
+  memberCount: number;
+  bots: Array<{
+    id: string;
+    platform: string;
+    qqUin: string;
+    displayName: string;
+    enabled: boolean;
+    reviewGroupId: string | null;
+    lastSeenAt: string | null;
+    connection: {
+      online: boolean;
+      connectionCount: number;
+    };
+    publishTargets: Array<{
+      id: string;
+      displayName: string;
+      enabled: boolean;
+      required: boolean;
+      status: "ready" | "unavailable" | "disabled";
+    }>;
+  }>;
+};
+
+export type SystemUser = {
+  id: string;
+  qqUin: string;
+  email: string | null;
+  displayName: string | null;
+  systemRole: SystemRole | null;
+  isTestAccount: boolean;
+  createdAt: string;
+  memberships: Array<{
+    id: string;
+    role: TenantRole;
+    tenant: {
+      id: string;
+      name: string;
+      slug: string;
+      status: TenantStatus;
+    };
+  }>;
+};
+
+export type SystemBot = {
+  id: string;
+  qqUin: string;
+  displayName: string;
+  enabled: boolean;
+  reviewGroupId: string | null;
+  lastSeenAt: string | null;
+  tenant: {
+    id: string;
+    name: string;
+    slug: string;
+    status: TenantStatus;
+  };
+  publishTargets: Array<{
+    id: string;
+    displayName: string;
+    enabled: boolean;
+    required: boolean;
+  }>;
+};
+
+export type SystemQueueSnapshot = {
+  runtime: {
+    running: boolean;
+    queued: number;
+    processing: number;
+    failed: number;
+    lastError: string | null;
+  };
+  publishAttempts: {
+    queued: number;
+    running: number;
+    failed: number;
+    succeeded: number;
+  };
+};
+
+export type AuditLogItem = {
+  id: string;
+  action: string;
+  targetType: string;
+  targetId: string | null;
+  detail: unknown;
+  createdAt: string;
+  tenant: {
+    id: string;
+    name: string;
+    slug: string;
+  } | null;
+  actor: {
+    id: string;
+    qqUin: string;
+    displayName: string | null;
+  } | null;
+};

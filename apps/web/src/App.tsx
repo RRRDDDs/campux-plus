@@ -1,0 +1,952 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { TenantSummary } from "@campux/domain";
+import { toast } from "sonner";
+import { api, createPostWithAttachments, CreatePostError } from "@/lib/api";
+import { canAccess, defaultMetadata, navItems } from "@/lib/app-model";
+import {
+  canAcceptAttachmentSelection,
+  runWhenSubmissionIdle,
+} from "@/lib/attachment-upload-state";
+import { readQueryInt, writeQueryParams } from "@/lib/url-query";
+import { clearPostDraft, readLastDraftTenantId, readPostDraft, writeDraftMirrorSync, writePostDraft } from "@/lib/post-draft";
+import { buildLoginPathWithReturnTo, readLoginReturnTo, readOAuthAuthorizeSearchFromReturnTo } from "@/lib/oauth-login-return";
+import type { ActiveBan, AdminTab, AuthenticatedMe, CurrentMembership, MainTab, MeResponse, OAuthAuthorizeClientResponse, Pagination, PostItem, PostsTab, TenantMetadata } from "@/types/app";
+import { usePendingAttachments } from "@/hooks/useUploadImages";
+import { LoadingScreen } from "@/features/auth/LoadingScreen";
+import { LoginScreen } from "@/features/auth/LoginScreen";
+import { BannedScreen } from "@/features/auth/BannedScreen";
+import { RequiredPasswordChangeScreen } from "@/features/auth/RequiredPasswordChangeScreen";
+import { TenantSelectionScreen } from "@/features/auth/TenantSelectionScreen";
+import { OAuthAuthorizeScreen } from "@/features/oauth/OAuthAuthorizeScreen";
+import { OpsStandaloneScreen } from "@/features/ops/OpsStandaloneScreen";
+import { OnboardingWizard } from "@/features/onboarding/OnboardingWizard";
+import { SetupWizard } from "@/features/onboarding/SetupWizard";
+import { WallStatusScreen } from "@/features/onboarding/WallStatusScreen";
+import { AppShell } from "@/features/shell/AppShell";
+import { CampaignsPage } from "@/features/services/CampaignsPage";
+import { CampaignDetailPage } from "@/features/services/CampaignDetailPage";
+
+type AppRoute =
+  | { kind: "tenant"; tab: MainTab; subTab?: AdminTab | PostsTab }
+  | { kind: "login"; returnTo?: string }
+  | { kind: "tenants" | "ops" }
+  | { kind: "oauth"; search: string }
+  | { kind: "campaigns"; filter?: string | undefined; keyword?: string | undefined }
+  | { kind: "campaign-detail"; campaignId: string };
+
+type SelectTenantResponse = {
+  ok: true;
+  currentTenant: TenantSummary;
+  currentMembership: CurrentMembership | null;
+  activeBan: ActiveBan | null;
+};
+
+const tabPaths: Record<MainTab, string> = {
+  post: "/post",
+  posts: "/posts",
+  confession: "/confession",
+  stats: "/stats",
+  services: "/services",
+  admin: "/admin",
+};
+
+const postsTabPaths: Record<PostsTab, string> = {
+  mine: "/posts",
+  review: "/posts/review",
+  published: "/posts/published",
+};
+
+const adminTabPaths: Record<AdminTab, string> = {
+  users: "/admin",
+  bans: "/admin/bans",
+  metadata: "/admin/metadata",
+  bots: "/admin/bots",
+  publish: "/admin/publish",
+  pluginConfig: "/admin/plugin-config",
+};
+
+const mainTabTitles: Record<MainTab, string> = {
+  post: "投稿",
+  posts: "稿件",
+  confession: "青青子衿",
+  stats: "统计",
+  services: "服务",
+  admin: "管理",
+};
+
+const postsTabTitles: Record<PostsTab, string> = {
+  mine: "你的稿件",
+  review: "审核稿件",
+  published: "已发布",
+};
+
+const adminTabTitles: Record<AdminTab, string> = {
+  users: "用户管理",
+  bans: "封禁管理",
+  metadata: "墙面设置",
+  bots: "机器人管理",
+  publish: "发布管理",
+  pluginConfig: "插件",
+};
+
+export function App() {
+  const [me, setMe] = useState<MeResponse | null>(null);
+  const [tenants, setTenants] = useState<TenantSummary[]>([]);
+  const [authContext, setAuthContext] = useState<{ managementHost: boolean; currentTenant: TenantSummary | null; deployMode: "single" | "multi" }>({ managementHost: false, currentTenant: null, deployMode: "multi" });
+  const [needsSetup, setNeedsSetup] = useState<boolean | null>(null);
+  const [route, setRoute] = useState<AppRoute>(() => routeFromPath(window.location.pathname));
+  const [activeTab, setActiveTabState] = useState<MainTab>(() => {
+    const initialRoute = routeFromPath(window.location.pathname);
+    if (initialRoute.kind === "tenant") return initialRoute.tab;
+    if (initialRoute.kind === "campaigns" || initialRoute.kind === "campaign-detail") return "services";
+    return "post";
+  });
+  const [metadata, setMetadata] = useState<TenantMetadata>(defaultMetadata);
+  const [oauthClientResponse, setOAuthClientResponse] = useState<OAuthAuthorizeClientResponse | null>(null);
+  const [posts, setPosts] = useState<PostItem[]>([]);
+  const [postsPagination, setPostsPagination] = useState<Pagination>(() => defaultPagination());
+  const [postsPage, setPostsPageState] = useState(() => readQueryInt("page", 1, { min: 1 }));
+  const [tenantDataLoading, setTenantDataLoading] = useState(false);
+  const [postText, setPostText] = useState(() => {
+    // 从本地存储同步回填最近一份草稿，避免刷新后先看到空表单再跳变。
+    return readPostDraft(readLastDraftTenantId())?.text ?? "";
+  });
+  const [anonymous, setAnonymous] = useState(false);
+  const [anonymousAvatar, setAnonymousAvatar] = useState<string>("");
+  const [postBgColor, setPostBgColor] = useState<string>("");
+  const [postTextColor, setPostTextColor] = useState<string>("");
+  const [postFont, setPostFont] = useState<string>("");
+  const [adminUserDetailTarget, setAdminUserDetailTarget] = useState<{ userId: string; nonce: number } | null>(null);
+  const [locationKey, setLocationKey] = useState(0);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submissionBusyRef = useRef(false);
+  const draftSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const { pending: pendingAttachments, add: addAttachments, remove: removeAttachment, validateBeforeUpload, markUploading, setProgress, markFailed, clearAll: clearAttachments } = usePendingAttachments({
+    maxSizeMb: metadata.imageMaxSizeMb,
+    compressionEnabled: metadata.imageCompression.enabled,
+  });
+
+  const hostTenant = authContext.currentTenant;
+  // In single-wall deployments tenant mechanics are hidden: no ops-panel entry,
+  // no wall switcher. The operator just uses their one wall like a normal admin.
+  const singleMode = authContext.deployMode === "single";
+  const showOpsUi = !singleMode;
+  const selectedTenant = me?.authenticated ? me.currentTenant : (hostTenant ?? tenants[0]);
+  const currentRole = me?.authenticated ? me.currentMembership?.role : undefined;
+  const defaultPostsTab: PostsTab = currentRole && canAccess(currentRole, "reviewer") ? "review" : "mine";
+  const documentTenantName = route.kind === "tenant" ? selectedTenant?.name : undefined;
+  const activeLogoUrl = (me?.authenticated ? selectedTenant?.logoUrl : hostTenant?.logoUrl)?.trim() || "/logo.svg";
+  const availableNavItems = useMemo(() => {
+    const accessible = !currentRole
+      ? navItems.filter((item) => item.value !== "admin")
+      : navItems.filter((item) => canAccess(currentRole, item.minRole));
+    // 青青子衿插件未启用时不展示「表白」入口（与投票竞选等预设插件一致）。
+    return metadata.enableConfessions ? accessible : accessible.filter((item) => item.value !== "confession");
+  }, [currentRole, metadata.enableConfessions]);
+
+  async function refreshMe() {
+    const data = await api<MeResponse>("/api/me");
+    setMe(data);
+  }
+
+  function navigate(nextRoute: AppRoute, mode: "push" | "replace" = "push") {
+    const path = pathFromRoute(nextRoute);
+    const currentPath = `${window.location.pathname}${window.location.search}`;
+    if (currentPath !== path) {
+      window.history[mode === "replace" ? "replaceState" : "pushState"](null, "", path);
+    }
+    setRoute(nextRoute);
+    if (nextRoute.kind === "tenant") {
+      setActiveTabState(nextRoute.tab);
+    }
+  }
+
+  function setActiveTab(tab: MainTab) {
+    navigate({ kind: "tenant", tab });
+  }
+
+  function setPostsSubTab(tab: PostsTab) {
+    navigate({ kind: "tenant", tab: "posts", subTab: tab });
+  }
+
+  function setAdminSubTab(tab: AdminTab) {
+    navigate({ kind: "tenant", tab: "admin", subTab: tab });
+  }
+
+  function openAdminUserDetail(userId: string) {
+    const params = new URLSearchParams(window.location.pathname === "/admin" ? window.location.search : "");
+    params.set("user", userId);
+    const path = `/admin?${params}`;
+    window.history.pushState(null, "", path);
+    setRoute({ kind: "tenant", tab: "admin", subTab: "users" });
+    setActiveTabState("admin");
+    setAdminUserDetailTarget({ userId, nonce: Date.now() });
+  }
+
+  function consumeAdminUserDetailTarget() {
+    setAdminUserDetailTarget(null);
+  }
+
+  function openPostDetailFromAdmin(post: { id: string; displayId: number; status: string }) {
+    const params = new URLSearchParams({
+      status: "all",
+      review_q: String(post.displayId),
+      post: post.id,
+    });
+    const path = `/posts/review?${params}`;
+    window.history.pushState(null, "", path);
+    setRoute({ kind: "tenant", tab: "posts", subTab: "review" });
+    setActiveTabState("posts");
+  }
+
+  function setPostsPage(page: number) {
+    setPostsPageState(page);
+    if (window.location.pathname === "/posts" || window.location.pathname === "/posts/mine") {
+      writeQueryParams({ page: page > 1 ? page : null });
+    }
+  }
+
+  useEffect(() => {
+    if (route.kind !== "oauth" || !me?.authenticated || !me.currentTenant || !me.currentMembership) {
+      setOAuthClientResponse(null);
+      return;
+    }
+
+    const searchParams = new URLSearchParams(route.search);
+    const clientId = searchParams.get("client_id");
+    if (!clientId) {
+      setOAuthClientResponse(null);
+      return;
+    }
+
+    let ignore = false;
+    void api<OAuthAuthorizeClientResponse>(`/api/oauth/clients/${encodeURIComponent(clientId)}`)
+      .then((data) => {
+        if (!ignore) {
+          setOAuthClientResponse(data);
+        }
+      })
+      .catch((caught) => {
+        if (!ignore) {
+          setOAuthClientResponse(null);
+          toast.error(caught instanceof Error ? caught.message : "无法读取 OAuth 应用信息");
+        }
+      });
+
+    return () => {
+      ignore = true;
+    };
+  }, [me, route]);
+
+  async function loadTenantData(page = postsPage) {
+    setTenantDataLoading(true);
+    try {
+      const [metadataData, postsData] = await Promise.all([
+        api<TenantMetadata>("/api/tenant/metadata"),
+        api<{ posts: PostItem[]; pagination: Pagination }>(`/api/posts/mine?page=${page}&limit=${postsPagination.limit}`),
+      ]);
+      setMetadata(metadataData);
+      setPosts(postsData.posts);
+      setPostsPagination(postsData.pagination);
+      setPostsPage(postsData.pagination.page);
+    } finally {
+      setTenantDataLoading(false);
+    }
+  }
+
+  async function refreshTenantData(page = postsPage) {
+    if (!me?.authenticated || !me.currentTenant || me.activeBan) {
+      return;
+    }
+
+    await loadTenantData(page);
+  }
+
+  useEffect(() => {
+    let ignore = false;
+    async function boot() {
+      try {
+        // Probe first-run setup before anything else. On a fresh instance this
+        // short-circuits to the SetupWizard and we skip the authed bootstrap.
+        const setupStatus = await api<{ needsSetup: boolean }>("/api/setup/status").catch(() => ({ needsSetup: false }));
+        if (!ignore) setNeedsSetup(setupStatus.needsSetup);
+        if (setupStatus.needsSetup) {
+          if (!ignore) setMe({ authenticated: false });
+          return;
+        }
+
+        const [meData, tenantData] = await Promise.all([
+          api<MeResponse>("/api/me"),
+          api<{ tenants: TenantSummary[] }>("/api/tenants"),
+          api<{ managementHost: boolean; currentTenant: TenantSummary | null; deployMode: "single" | "multi" }>("/api/auth/context").then((data) => {
+            if (!ignore) setAuthContext(data);
+            return data;
+          }),
+        ]);
+        if (!ignore) {
+          setMe(meData);
+          setTenants(tenantData.tenants);
+        }
+      } catch (caught) {
+        if (!ignore) {
+          setError(caught instanceof Error ? caught.message : "暂时无法连接服务，请稍后再试");
+          setMe({ authenticated: false });
+        }
+      }
+    }
+
+    void boot();
+    return () => {
+      ignore = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const syncRoute = () => {
+      const nextRoute = routeFromPath(window.location.pathname);
+      setRoute(nextRoute);
+      setLocationKey((key) => key + 1);
+      if (nextRoute.kind === "tenant") {
+        setActiveTabState(nextRoute.tab);
+      }
+    };
+    window.addEventListener("popstate", syncRoute);
+    return () => window.removeEventListener("popstate", syncRoute);
+  }, []);
+
+  useEffect(() => {
+    void refreshTenantData().catch((caught) => {
+      toast.error(caught instanceof Error ? caught.message : "无法读取校园墙数据");
+    });
+  }, [me?.authenticated ? me.currentTenant?.id : null, me?.authenticated ? me.activeBan?.id : null]);
+
+  useEffect(() => {
+    if (!me?.authenticated || !me.currentTenant || me.activeBan) {
+      return;
+    }
+    void refreshTenantData(postsPage).catch((caught) => {
+      toast.error(caught instanceof Error ? caught.message : "无法读取稿件列表");
+    });
+  }, [postsPage]);
+
+  // 草稿自动保存：正文/匿名/样式变化即写入浏览器本地数据库，按租户隔离。
+  // 切墙或登出时清理，避免恢复出上一个校园墙的草稿。
+  const draftTenantId = me?.authenticated && me.currentTenant ? me.currentTenant.id : null;
+  const draftKeyRef = useRef(draftTenantId);
+  useEffect(() => {
+    if (draftTenantId === draftKeyRef.current) {
+      return;
+    }
+    const previousTenantId = draftKeyRef.current;
+    draftKeyRef.current = draftTenantId;
+    if (previousTenantId) {
+      void clearPostDraft(previousTenantId).catch(() => undefined);
+    }
+    const restored = readPostDraft(draftTenantId ?? "");
+    if (!restored) {
+      setPostText("");
+      setAnonymous(false);
+      setAnonymousAvatar("");
+      setPostBgColor("");
+      setPostTextColor("");
+      setPostFont("");
+      return;
+    }
+    setPostText(restored.text);
+    setAnonymous(restored.anonymous);
+    setAnonymousAvatar(restored.anonymousAvatar);
+    setPostBgColor(restored.bgColor);
+    setPostTextColor(restored.textColor);
+    setPostFont(restored.font);
+  }, [draftTenantId]);
+
+  useEffect(() => {
+    if (!draftTenantId) {
+      return;
+    }
+    const state = { text: postText, anonymous, anonymousAvatar, bgColor: postBgColor, textColor: postTextColor, font: postFont };
+    // 镜像随每次变化同步落盘，保证任何时候刷新都能回填。
+    writeDraftMirrorSync(draftTenantId, state);
+    // IndexedDB 提交去抖 250ms，避免每字一次事务。
+    if (draftSaveTimerRef.current) {
+      clearTimeout(draftSaveTimerRef.current);
+    }
+    draftSaveTimerRef.current = setTimeout(() => {
+      draftSaveTimerRef.current = null;
+      void writePostDraft(draftTenantId, state).catch(() => undefined);
+    }, 250);
+    const handleUnload = () => {
+      // 关闭页面前取消未完成的提交：镜像已同步写入，正文不会丢。
+      if (draftSaveTimerRef.current) {
+        clearTimeout(draftSaveTimerRef.current);
+        draftSaveTimerRef.current = null;
+      }
+    };
+    window.addEventListener("beforeunload", handleUnload);
+    return () => window.removeEventListener("beforeunload", handleUnload);
+  }, [draftTenantId, postText, anonymous, anonymousAvatar, postBgColor, postTextColor, postFont]);
+
+  useEffect(() => {
+    if (!me?.authenticated || !me.currentMembership) {
+      return;
+    }
+
+    if (!availableNavItems.some((item) => item.value === activeTab)) {
+      setActiveTab(availableNavItems[0]?.value ?? "post");
+    }
+  }, [activeTab, availableNavItems, me]);
+
+  useEffect(() => {
+    if (!me) {
+      return;
+    }
+
+    if (!me.authenticated) {
+      if (route.kind === "oauth") {
+        const returnTo = `${window.location.pathname}${window.location.search}`;
+        const path = buildLoginPathWithReturnTo(returnTo);
+        window.history.replaceState(null, "", path);
+        setRoute({ kind: "login", returnTo });
+      } else if (route.kind !== "login") {
+        navigate({ kind: "login" }, "replace");
+      }
+      return;
+    }
+
+    if (route.kind === "login") {
+      const oauthSearch = readOAuthAuthorizeSearchFromRoute(route);
+      if (oauthSearch !== null) {
+        navigate({ kind: "oauth", search: oauthSearch }, "replace");
+      } else {
+        navigate(me.needsTenantSelection || !me.currentTenant ? { kind: "tenants" } : { kind: "tenant", tab: activeTab }, "replace");
+      }
+      return;
+    }
+
+    if (route.kind === "ops" && !canOpenOps(me)) {
+      navigate(me.needsTenantSelection || !me.currentTenant ? { kind: "tenants" } : { kind: "tenant", tab: activeTab }, "replace");
+      return;
+    }
+
+    if ((me.needsTenantSelection || !me.currentTenant || !me.currentMembership) && route.kind !== "tenants" && route.kind !== "ops" && route.kind !== "oauth") {
+      navigate({ kind: "tenants" }, "replace");
+      return;
+    }
+
+    if (route.kind === "tenant" && window.location.pathname !== pathFromRoute(route)) {
+      navigate(route, "replace");
+    }
+  }, [me, route.kind, route.kind === "login" ? route.returnTo : undefined, route.kind === "tenant" ? route.tab : undefined, route.kind === "tenant" ? route.subTab : undefined]);
+
+  useEffect(() => {
+    document.title = buildDocumentTitle(route, documentTenantName, me?.authenticated ? me.user.systemRole : null);
+  }, [route, documentTenantName, me]);
+
+  useEffect(() => {
+    setDocumentIcon(activeLogoUrl);
+  }, [activeLogoUrl]);
+
+  async function login(account: string, password: string): Promise<MeResponse> {
+    setError("");
+    const data = await api<MeResponse>("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ account, password }),
+    });
+    setMe(data);
+    if (data.authenticated) {
+      if (data.user.passwordChangeRequired) {
+        if (route.kind !== "login") {
+          navigate({ kind: "login" }, "replace");
+        }
+        return data;
+      }
+      const oauthSearch = readOAuthAuthorizeSearchFromRoute(route);
+      if (oauthSearch !== null) {
+        navigate({ kind: "oauth", search: oauthSearch }, "replace");
+        return data;
+      }
+      navigate(data.needsTenantSelection ? { kind: "tenants" } : { kind: "tenant", tab: activeTab });
+    }
+    return data;
+  }
+
+  function completeRegistration(data: MeResponse) {
+    setMe(data);
+    setError("");
+    if (data.authenticated) {
+      navigate(canOpenOps(data) ? { kind: "ops" } : data.needsTenantSelection ? { kind: "tenants" } : { kind: "tenant", tab: activeTab }, "replace");
+    }
+  }
+
+  async function completeRequiredPasswordChange(newPassword: string) {
+    setBusy(true);
+    setError("");
+    try {
+      await api("/api/auth/password/required", {
+        method: "POST",
+        body: JSON.stringify({ newPassword }),
+      });
+      const data = await api<MeResponse>("/api/me");
+      setMe(data);
+      if (data.authenticated) {
+        navigate(data.needsTenantSelection ? { kind: "tenants" } : { kind: "tenant", tab: activeTab }, "replace");
+      }
+      toast.success("密码已更新。");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "修改密码失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function logout() {
+    await api<{ ok: true }>("/api/auth/logout", { method: "POST" }).catch(() => undefined);
+    if (draftTenantId) {
+      void clearPostDraft(draftTenantId).catch(() => undefined);
+    }
+    setMe({ authenticated: false });
+    setPostText("");
+    clearAttachments();
+    setPosts([]);
+    navigate({ kind: "login" }, "replace");
+  }
+
+  async function selectTenant(tenantId: string) {
+    const data = await api<SelectTenantResponse>("/api/session/tenant", {
+      method: "POST",
+      body: JSON.stringify({ tenantId }),
+    });
+    setMetadata(defaultMetadata);
+    setPosts([]);
+    setPostsPagination(defaultPagination());
+    setPostsPage(1);
+    clearAttachments();
+    setPostText("");
+    setAnonymous(false);
+    setAnonymousAvatar("");
+    setMe((current) => current?.authenticated ? {
+      ...current,
+      currentTenant: data.currentTenant,
+      currentMembership: data.currentMembership,
+      activeBan: data.activeBan,
+      needsTenantSelection: false,
+    } : current);
+    if (route.kind === "oauth") {
+      return;
+    }
+    navigate({ kind: "tenant", tab: activeTab });
+    await loadTenantData(1);
+  }
+
+  function mutateSubmissionForm(mutation: () => void): boolean {
+    return runWhenSubmissionIdle(submissionBusyRef.current, mutation);
+  }
+
+  async function handleUploadFiles(files: ArrayLike<File> | null) {
+    if (!canAcceptAttachmentSelection(submissionBusyRef.current, files?.length ?? 0)) {
+      return;
+    }
+    addAttachments(files);
+  }
+
+  function handleRemoveAttachment(attachmentId: string) {
+    mutateSubmissionForm(() => removeAttachment(attachmentId));
+  }
+
+  async function submitPost() {
+    if (submissionBusyRef.current) {
+      return;
+    }
+    if (pendingAttachments.some((p) => p.status === "converting")) {
+      toast.error("请等待视频转换完成后再投稿");
+      return;
+    }
+    if (!validateBeforeUpload()) {
+      return;
+    }
+    if (pendingAttachments.some((p) => p.status === "failed")) {
+      toast.error("请移除上传失败的附件后再投稿");
+      return;
+    }
+    if (postText.trim().length === 0) {
+      toast.error("正文不能为空");
+      return;
+    }
+    const submissionAttachments = [...pendingAttachments];
+    const submissionAttachmentIds = new Set(submissionAttachments.map((attachment) => attachment.id));
+    submissionBusyRef.current = true;
+    setBusy(true);
+    markUploading(submissionAttachmentIds);
+    try {
+      // Local image files only; claimed remote GIFs are sent separately.
+      const files = submissionAttachments
+        .filter((p) => !p.remoteGifUrl)
+        .map((p) => p.file);
+      const remoteGifClaims = submissionAttachments
+        .filter((p) => p.remoteGifUrl)
+        .map((p) => ({ url: p.remoteGifUrl!, proof: p.remoteGifProof ?? "" }));
+      const attachmentOrder = submissionAttachments.map((p) => (
+        p.remoteGifUrl ? "remote" as const : "local" as const
+      ));
+      await createPostWithAttachments(
+        postText,
+        anonymous,
+        files,
+        (totalPercent) => {
+          setProgress(totalPercent);
+        },
+        remoteGifClaims.length > 0 ? remoteGifClaims : undefined,
+        attachmentOrder,
+        postBgColor || undefined,
+        postTextColor || undefined,
+        postFont || undefined,
+        anonymousAvatar || undefined,
+      );
+      clearAttachments(submissionAttachmentIds);
+      // 取消尚未落盘的 IndexedDB 提交，避免提交后 250ms 内又把旧草稿写回去。
+      if (draftSaveTimerRef.current) {
+        clearTimeout(draftSaveTimerRef.current);
+        draftSaveTimerRef.current = null;
+      }
+      setPostText("");
+      setAnonymous(false);
+      setAnonymousAvatar("");
+      setPostBgColor("");
+      setPostTextColor("");
+      setPostFont("");
+      if (draftTenantId) {
+        void clearPostDraft(draftTenantId).catch(() => undefined);
+      }
+      toast.success("投稿已提交，等待审核。");
+      const data = await api<{ posts: PostItem[]; pagination: Pagination }>("/api/posts/mine?page=1&limit=10");
+      setPosts(data.posts);
+      setPostsPagination(data.pagination);
+      setPostsPage(1);
+      setActiveTab("posts");
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "投稿失败";
+      if (caught instanceof CreatePostError) {
+        markFailed(
+          caught.fileIndex,
+          caught.remoteGifIndexes,
+          message,
+          submissionAttachments,
+        );
+      } else {
+        markFailed(undefined, undefined, message, submissionAttachments);
+      }
+      toast.error(message);
+    } finally {
+      submissionBusyRef.current = false;
+      setBusy(false);
+    }
+  }
+
+  if (!me) {
+    return <LoadingScreen />;
+  }
+
+  if (needsSetup) {
+    return (
+      <SetupWizard
+        onComplete={(data, mode) => {
+          setNeedsSetup(false);
+          setAuthContext((current) => ({ ...current, deployMode: mode }));
+          setMe(data);
+          if (data.authenticated) {
+            navigate(canOpenOps(data) && mode === "multi" ? { kind: "ops" } : data.needsTenantSelection ? { kind: "tenants" } : { kind: "tenant", tab: "post" }, "replace");
+          }
+        }}
+      />
+    );
+  }
+
+  if (!me.authenticated) {
+    return <LoginScreen hostTenant={hostTenant ?? undefined} logoUrl={activeLogoUrl} error={error} managementHost={authContext.managementHost} onLogin={login} onRegistered={completeRegistration} />;
+  }
+
+  if (me.user.passwordChangeRequired) {
+    return <RequiredPasswordChangeScreen busy={busy} error={error} onChangePassword={completeRequiredPasswordChange} onLogout={logout} />;
+  }
+
+  if (me.currentTenant && me.currentMembership && me.activeBan) {
+    return <BannedScreen ban={me.activeBan} me={me} selectedTenant={me.currentTenant} onLogout={logout} />;
+  }
+
+  if (route.kind === "tenants") {
+    if (canOpenOps(me)) {
+      return <TenantSelectionScreen me={me} onSelectTenant={selectTenant} onOpenOps={() => navigate({ kind: "ops" })} onLogout={logout} />;
+    }
+
+    return <TenantSelectionScreen me={me} onSelectTenant={selectTenant} onLogout={logout} />;
+  }
+
+  if (canOpenOps(me) && (route.kind === "ops" || me.memberships.length === 0)) {
+    if (me.memberships.length > 0) {
+      return <OpsStandaloneScreen me={me} onBackToTenants={() => navigate({ kind: "tenants" })} onTenantCreated={refreshMe} onEnterTenant={selectTenant} onLogout={logout} />;
+    }
+
+    return <OpsStandaloneScreen me={me} onTenantCreated={refreshMe} onEnterTenant={selectTenant} onLogout={logout} />;
+  }
+
+  if (me.needsTenantSelection || !me.currentTenant || !me.currentMembership) {
+    if (canOpenOps(me)) {
+      return <TenantSelectionScreen me={me} onSelectTenant={selectTenant} onOpenOps={() => navigate({ kind: "ops" })} onLogout={logout} />;
+    }
+
+    return (
+      <TenantSelectionScreen
+        me={me}
+        onSelectTenant={selectTenant}
+        onLogout={logout}
+      />
+    );
+  }
+
+  if (route.kind === "oauth") {
+    return (
+      <OAuthAuthorizeScreen
+        me={me as AuthenticatedMe & { currentTenant: NonNullable<AuthenticatedMe["currentTenant"]>; currentMembership: NonNullable<AuthenticatedMe["currentMembership"]> }}
+        search={route.search}
+        clientResponse={oauthClientResponse}
+        onLogout={logout}
+        onRequireTenantSelection={() => navigate({ kind: "tenants" })}
+      />
+    );
+  }
+
+  // Archived walls are dormant: show a notice instead of the workspace.
+  if (me.currentTenant.status === "archived") {
+    return (
+      <WallStatusScreen
+        variant="archived"
+        wallName={me.currentTenant.name}
+        onBackToTenants={me.memberships.length > 1 || (showOpsUi && canOpenOps(me)) ? () => navigate({ kind: "tenants" }) : undefined}
+        onLogout={logout}
+      />
+    );
+  }
+
+  // A wall is only operable once its bot has connected at least once. Until then
+  // route the operating admin through the guided setup wizard; other members see
+  // a short pending notice.
+  if (!me.currentTenant.ready) {
+    if (me.currentMembership.role === "admin") {
+      return (
+        <OnboardingWizard
+          tenant={me.currentTenant}
+          operatorName={me.user.displayName}
+          onRefreshMe={refreshMe}
+          onEnterWorkspace={() => setActiveTab("post")}
+          onBackToTenants={me.memberships.length > 1 || (showOpsUi && canOpenOps(me)) ? () => navigate({ kind: "tenants" }) : undefined}
+          onLogout={logout}
+        />
+      );
+    }
+    return (
+      <WallStatusScreen
+        variant="pending"
+        wallName={me.currentTenant.name}
+        onBackToTenants={me.memberships.length > 1 || (showOpsUi && canOpenOps(me)) ? () => navigate({ kind: "tenants" }) : undefined}
+        onLogout={logout}
+      />
+    );
+  }
+
+  return (
+    <AppShell
+      activeTab={activeTab}
+      adminTab={route.kind === "tenant" && route.tab === "admin" ? (route.subTab as AdminTab | undefined) ?? "users" : "users"}
+      me={me as AuthenticatedMe & { currentTenant: NonNullable<AuthenticatedMe["currentTenant"]>; currentMembership: NonNullable<AuthenticatedMe["currentMembership"]> }}
+      navItems={availableNavItems}
+      metadata={metadata}
+      posts={posts}
+      busy={busy}
+      dataLoading={tenantDataLoading}
+      postText={postText}
+      postBgColor={postBgColor}
+      postTextColor={postTextColor}
+      postFont={postFont}
+      postsTab={route.kind === "tenant" && route.tab === "posts" ? (route.subTab as PostsTab | undefined) ?? defaultPostsTab : defaultPostsTab}
+      postsPagination={postsPagination}
+      anonymous={anonymous}
+      anonymousAvatar={anonymousAvatar}
+      pendingAttachments={pendingAttachments}
+      onActiveTabChange={setActiveTab}
+      onAdminTabChange={setAdminSubTab}
+      onAnonymousChange={(value) => mutateSubmissionForm(() => setAnonymous(value))}
+      onAnonymousAvatarChange={(value) => mutateSubmissionForm(() => setAnonymousAvatar(value))}
+      onBgColorChange={(value) => mutateSubmissionForm(() => setPostBgColor(value))}
+      onTextColorChange={(value) => mutateSubmissionForm(() => setPostTextColor(value))}
+      onFontChange={(value) => mutateSubmissionForm(() => setPostFont(value))}
+      onFilesSelected={handleUploadFiles}
+      onLogout={logout}
+      onOpenOps={showOpsUi && canOpenOps(me) ? () => navigate({ kind: "ops" }) : undefined}
+      onSelectTenant={selectTenant}
+      onPostTextChange={(value) => mutateSubmissionForm(() => setPostText(value))}
+      onPostsTabChange={setPostsSubTab}
+      onRefreshMe={refreshMe}
+      adminUserDetailTarget={adminUserDetailTarget}
+      onOpenAdminUserDetail={openAdminUserDetail}
+      onAdminUserDetailTargetConsumed={consumeAdminUserDetailTarget}
+      onOpenPostDetailFromAdmin={openPostDetailFromAdmin}
+      onPostsPageChange={setPostsPage}
+      onRefreshTenantData={() => refreshTenantData(postsPage)}
+      onRemoveAttachment={handleRemoveAttachment}
+      onSubmitPost={submitPost}
+    />
+  );
+}
+
+function readOAuthAuthorizeSearchFromRoute(route: AppRoute) {
+  return route.kind === "login" ? readOAuthAuthorizeSearchFromReturnTo(route.returnTo) : null;
+}
+
+function defaultPagination(): Pagination {
+  return {
+    page: 1,
+    limit: 10,
+    total: 0,
+    pageCount: 1,
+  };
+}
+
+function canOpenOps(me: AuthenticatedMe) {
+  return me.user.systemRole === "system_operator" || me.user.systemRole === "operations_admin";
+}
+
+function routeFromPath(pathname: string): AppRoute {
+  const normalized = pathname.replace(/\/+$/, "") || "/";
+  if (normalized === "/login") {
+    const returnTo = readLoginReturnTo(window.location.search);
+    return returnTo ? { kind: "login", returnTo } : { kind: "login" };
+  }
+  if (normalized === "/tenants") {
+    return { kind: "tenants" };
+  }
+  if (normalized === "/ops") {
+    return { kind: "ops" };
+  }
+  if (normalized === "/oauth/authorize") {
+    return { kind: "oauth", search: window.location.search };
+  }
+  if (normalized.startsWith("/services/campaigns")) {
+    const suffix = normalized.slice("/services/campaigns".length);
+    const detailMatch = /^\/([^/?#]+)$/.exec(suffix);
+    if (detailMatch) {
+      return { kind: "campaign-detail", campaignId: decodeURIComponent(detailMatch[1] as string) };
+    }
+    const params = new URLSearchParams(window.location.search);
+    const filter = params.get("filter") ?? undefined;
+    const keyword = params.get("q") ?? undefined;
+    return filter || keyword
+      ? { kind: "campaigns", filter, keyword }
+      : { kind: "campaigns" };
+  }
+
+  // Note: "/posts" (the bare posts path) intentionally resolves without an
+  // explicit subTab so the default tab can be role-aware (reviewers land on the
+  // review tab). Only the explicit "/posts/review" deep link forces a subTab.
+  const matchedPostsTab = (Object.entries(postsTabPaths) as Array<[PostsTab, string]>).find(([tab, path]) => path === normalized && tab !== "mine")?.[0];
+  if (matchedPostsTab) {
+    return { kind: "tenant", tab: "posts", subTab: matchedPostsTab };
+  }
+
+  const matchedAdminTab = (Object.entries(adminTabPaths) as Array<[AdminTab, string]>).find(([, path]) => path === normalized)?.[0];
+  if (matchedAdminTab) {
+    return { kind: "tenant", tab: "admin", subTab: matchedAdminTab };
+  }
+
+  if (normalized === "/posts/mine") {
+    return { kind: "tenant", tab: "posts", subTab: "mine" };
+  }
+  if (normalized === "/admin/users") {
+    return { kind: "tenant", tab: "admin", subTab: "users" };
+  }
+  if (normalized === "/admin/review") {
+    return { kind: "tenant", tab: "posts", subTab: "review" };
+  }
+
+  const matchedTab = (Object.entries(tabPaths) as Array<[MainTab, string]>).find(([, path]) => path === normalized)?.[0];
+  return {
+    kind: "tenant",
+    tab: matchedTab ?? "post",
+  };
+}
+
+function pathFromRoute(route: AppRoute) {
+  if (route.kind === "tenant") {
+    if (route.tab === "posts" && route.subTab) {
+      return postsTabPaths[route.subTab as PostsTab] ?? tabPaths.posts;
+    }
+    if (route.tab === "admin" && route.subTab) {
+      return adminTabPaths[route.subTab as AdminTab] ?? tabPaths.admin;
+    }
+    return tabPaths[route.tab];
+  }
+  if (route.kind === "oauth") {
+    return `/oauth/authorize${route.search}`;
+  }
+  if (route.kind === "campaigns") {
+    const params = new URLSearchParams();
+    if (route.filter) params.set("filter", route.filter);
+    if (route.keyword) params.set("q", route.keyword);
+    const qs = params.toString();
+    return `/services/campaigns${qs ? `?${qs}` : ""}`;
+  }
+  if (route.kind === "campaign-detail") {
+    return `/services/campaigns/${encodeURIComponent(route.campaignId)}`;
+  }
+  if (route.kind === "login") {
+    return route.returnTo ? buildLoginPathWithReturnTo(route.returnTo) : "/login";
+  }
+  return `/${route.kind}`;
+}
+
+function buildDocumentTitle(route: AppRoute, tenantName?: string, systemRole?: AuthenticatedMe["user"]["systemRole"] | null) {
+  const pageTitle = pageTitleFromRoute(route, systemRole);
+  const titleParts = route.kind === "tenant" ? [pageTitle, tenantName, "Campux"] : [pageTitle, "Campux"];
+  return titleParts.filter(Boolean).join(" - ");
+}
+
+function pageTitleFromRoute(route: AppRoute, systemRole?: AuthenticatedMe["user"]["systemRole"] | null) {
+  if (route.kind === "login") {
+    return "登录";
+  }
+  if (route.kind === "tenants") {
+    return "选择校园墙";
+  }
+  if (route.kind === "ops") {
+    return systemRole === "operations_admin" ? "运营管理" : "运维面板";
+  }
+  if (route.kind === "oauth") {
+    return "OAuth 授权";
+  }
+  if (route.kind !== "tenant") {
+    return "Campux";
+  }
+  if (route.tab === "posts" && route.subTab) {
+    return postsTabTitles[route.subTab as PostsTab] ?? mainTabTitles.posts;
+  }
+  if (route.tab === "admin" && route.subTab) {
+    return adminTabTitles[route.subTab as AdminTab] ?? mainTabTitles.admin;
+  }
+  return mainTabTitles[route.tab];
+}
+
+function setDocumentIcon(href: string) {
+  const selectors = ['link[rel="icon"]', 'link[rel="apple-touch-icon"]'];
+  for (const selector of selectors) {
+    let link = document.head.querySelector<HTMLLinkElement>(selector);
+    if (!link) {
+      link = document.createElement("link");
+      link.rel = selector.includes("apple") ? "apple-touch-icon" : "icon";
+      if (link.rel === "icon") {
+        link.type = "image/svg+xml";
+      }
+      document.head.appendChild(link);
+    }
+    link.href = href;
+  }
+}

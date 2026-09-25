@@ -1,0 +1,61 @@
+# Dependencies
+node_modules/
+.bun/
+
+# Build outputs
+dist/
+build/
+.vite/
+docs/.vitepress/cache/
+coverage/
+*.tsbuildinfo
+
+# Runtime data
+data/
+uploads/
+tmp/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+bun-debug.log*
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Legacy local volumes
+legacy/docker/volumes/
+legacy/docker/mongodb/mongodata/
+legacy/docker/minio/data/
+legacy/data/
+
+# Locally-installed Claude skills (not part of the project)
+.claude/skills/
+
+# 自定义字体（雕花「字体选择」功能）默认不入库，避免数十 MB TTF 膨胀 git 历史
+/font/
+
+# 单文件发布产物 & 编译期生成的内嵌资源清单（由 scripts/build-release.ts 现生成）
+/release/
+apps/server/src/standalone/embedded-assets.generated.ts
+
+# SQLite Prisma client 生成产物（由 scripts/generate-sqlite-schema.ts / db:sqlite:generate 现生成，
+# 含 17MB 查询引擎 .node，不入库）。schema.sqlite.prisma 与 sqlite-baseline.sql 是源码派生产物，入库。
+/packages/db/generated/
+
+# 单文件运行时数据目录（SQLite 库、本地存储、解包资源）
+/data/

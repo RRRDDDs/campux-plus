@@ -1,0 +1,60 @@
+name: Build Backend Latest Image
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - '.github/workflows/build-latest-backend.yaml'
+      - 'main.go'
+      - 'Dockerfile'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Set up Go 1.24
+        uses: actions/setup-go@v2
+        with:
+          go-version: 1.24
+
+      - name: Set up Node.js 20.12
+        uses: actions/setup-node@v2
+        with:
+          node-version: 20.12
+        
+      - name: Build the backend
+        run: |
+          go build -o bin/campux main.go
+
+      - name: Build the frontend
+        run: |
+          cd frontend
+          npm install
+          npm run build
+      - name: Login to Registry
+        run: docker login --username=${{ secrets.DOCKER_HUB_USERNAME }} --password ${{ secrets.DOCKER_HUB_PASSWORD }}
+      - name: Create Buildx
+        run: docker buildx create --name mybuilder --use
+      - name: Build
+        run: docker buildx build --platform linux/arm64,linux/amd64 -t rockchin/campux:latest . --push
+
+      - name: Push Finish Notification
+        run: |
+          curl --location '${{ secrets.ONEBOT_V11_ENDPOINT }}/send_group_msg' \
+            --header 'Content-Type: application/json' \
+            --header 'Authorization: Bearer ${{ secrets.ONEBOT_V11_TOKEN }}' \
+            --data '{
+                "group_id": ${{ secrets.ONEBOT_V11_GROUP_ID }},
+                "message": "Campux 构建完成。"
+            }'

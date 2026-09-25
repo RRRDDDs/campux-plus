@@ -1,0 +1,261 @@
+import { Prisma, PrismaClient } from "@campux/db";
+import { loadConfig } from "@campux/config";
+import { hashPassword } from "./password";
+import { resolveMembershipRoleForSeed } from "./seed-membership";
+import { runSeedInTransaction } from "./seed-transaction";
+
+// Guard: the demo seed creates well-known accounts with a shared weak password
+// ("campux123"), including a system_operator. That is fine for local dev but a
+// security hazard if it ever runs against a production database. Refuse unless
+// explicitly forced.
+if (process.env.NODE_ENV === "production" && process.env.CAMPUX_ALLOW_SEED !== "true") {
+  console.error(
+    "Refusing to run the demo seed in production (it creates weak-password test accounts).\n" +
+      "Set CAMPUX_ALLOW_SEED=true only if you really intend to seed demo data.",
+  );
+  process.exit(1);
+}
+
+// loadConfig() resolves the correct DATABASE_URL (incl. SQLite file: URLs) and
+// honors CAMPUX_DB_PROVIDER so the runtime-selected PrismaClient connects to
+// the right database. Without this, `new PrismaClient()` falls back to the
+// postgres datasource in schema.prisma and fails on SQLite-only dev setups.
+process.env.DATABASE_URL ??= loadConfig().databaseUrl;
+
+const prisma = new PrismaClient();
+
+const passwordHash = await hashPassword("campux123");
+
+const tenants = [
+  {
+    id: "tenant-canton",
+    slug: "canton-wall",
+    name: "广府校园墙",
+    themeColor: "#e0574f",
+    banner: "今晚 22:30 后投稿会顺延到明早审核，请勿重复提交同一内容。",
+  },
+  {
+    id: "tenant-riverside",
+    slug: "riverside",
+    name: "江岸同学墙",
+    themeColor: "#2f8f7b",
+    banner: "江岸同学墙试运行中，欢迎提交校园服务建议。",
+  },
+];
+
+const postRules = [
+  "不发布隐私信息、辱骂、人身攻击和未经确认的指控。",
+  "寻物招领请写清地点、时间和联系方式。",
+  "图片最多 9 张，审核通过后会同步到本校启用的 QQ 墙号。",
+];
+
+const services = [
+  { title: "修改名称", description: "账户资料" },
+  { title: "修改密码", description: "账号服务" },
+  { title: "投稿规则", description: "查看本墙规范" },
+  { title: "校园服务", description: "推荐入口" },
+];
+
+async function seedTenant(db: Prisma.TransactionClient, tenant: (typeof tenants)[number]) {
+  await db.tenant.upsert({
+    where: { id: tenant.id },
+    update: {
+      slug: tenant.slug,
+      name: tenant.name,
+      status: "active",
+      themeColor: tenant.themeColor,
+    },
+    create: {
+      id: tenant.id,
+      slug: tenant.slug,
+      name: tenant.name,
+      status: "active",
+      themeColor: tenant.themeColor,
+      nextPostDisplayId: 1,
+    },
+  });
+
+  for (const entry of [
+    { key: "brand", value: tenant.name },
+    { key: "banner", value: tenant.banner },
+    { key: "post_rules", value: postRules },
+    { key: "pending_post_limit", value: 1 },
+    { key: "services", value: services },
+  ]) {
+    await db.tenantMetadata.upsert({
+      where: {
+        tenantId_key: {
+          tenantId: tenant.id,
+          key: entry.key,
+        },
+      },
+      update: {
+        value: entry.value,
+      },
+      create: {
+        tenantId: tenant.id,
+        key: entry.key,
+        value: entry.value,
+      },
+    });
+  }
+
+  const botQqUin = BigInt(tenant.id === "tenant-canton" ? "2854199010" : "2854199020");
+  const botAccount = await db.botAccount.upsert({
+    where: {
+      tenantId_qqUin: {
+        tenantId: tenant.id,
+        qqUin: botQqUin,
+      },
+    },
+    update: {
+      displayName: `${tenant.name} 1 号墙`,
+      enabled: true,
+      reviewGroupId: tenant.id === "tenant-canton" ? "91000001" : "91000002",
+    },
+    create: {
+      tenantId: tenant.id,
+      qqUin: botQqUin,
+      displayName: `${tenant.name} 1 号墙`,
+      enabled: true,
+      reviewGroupId: tenant.id === "tenant-canton" ? "91000001" : "91000002",
+    },
+  });
+
+  await db.publishTarget.upsert({
+    where: {
+      id: `${tenant.id}-qzone-primary`,
+    },
+    update: {
+      botAccountId: botAccount.id,
+      displayName: "主墙号",
+      enabled: true,
+      required: true,
+      publishDelaySeconds: 10,
+    },
+    create: {
+      id: `${tenant.id}-qzone-primary`,
+      tenantId: tenant.id,
+      botAccountId: botAccount.id,
+      displayName: "主墙号",
+      enabled: true,
+      required: true,
+      publishDelaySeconds: 10,
+    },
+  });
+}
+
+async function seedUser(db: Prisma.TransactionClient, {
+  qqUin,
+  email,
+  displayName,
+  systemRole,
+  memberships,
+  isTestAccount = true,
+}: {
+  qqUin: string;
+  email: string;
+  displayName: string;
+  systemRole?: "operations_admin" | "system_operator";
+  memberships: Array<{ tenantId: string; role: "submitter" | "reviewer" | "admin" }>;
+  isTestAccount?: boolean;
+}) {
+  const user = await db.user.upsert({
+    where: { qqUin: BigInt(qqUin) },
+    update: {
+      displayName,
+      email,
+      passwordHash,
+      passwordChangeRequired: false,
+      isTestAccount,
+      systemRole: systemRole ?? null,
+    },
+    create: {
+      qqUin: BigInt(qqUin),
+      email,
+      displayName,
+      passwordHash,
+      passwordChangeRequired: false,
+      isTestAccount,
+      systemRole: systemRole ?? null,
+    },
+  });
+
+  for (const membership of memberships) {
+    const existingMembership = await db.tenantMembership.findUnique({
+      where: {
+        tenantId_userId: {
+          tenantId: membership.tenantId,
+          userId: user.id,
+        },
+      },
+      select: { role: true },
+    });
+    await db.tenantMembership.upsert({
+      where: {
+        tenantId_userId: {
+          tenantId: membership.tenantId,
+          userId: user.id,
+        },
+      },
+      update: {
+        role: resolveMembershipRoleForSeed(existingMembership?.role, membership.role),
+      },
+      create: {
+        tenantId: membership.tenantId,
+        userId: user.id,
+        role: membership.role,
+      },
+    });
+  }
+}
+
+await runSeedInTransaction<Prisma.TransactionClient>(prisma, async (tx) => {
+  for (const tenant of tenants) {
+    await seedTenant(tx, tenant);
+  }
+
+  await seedUser(tx, {
+    qqUin: "10000",
+    email: "submitter@example.com",
+    displayName: "投稿测试号",
+    memberships: [{ tenantId: "tenant-canton", role: "submitter" }],
+  });
+
+  await seedUser(tx, {
+    qqUin: "20000",
+    email: "reviewer@example.com",
+    displayName: "审核测试号",
+    memberships: [{ tenantId: "tenant-canton", role: "reviewer" }],
+  });
+
+  await seedUser(tx, {
+    qqUin: "30000",
+    email: "admin@example.com",
+    displayName: "多墙管理员",
+    memberships: [
+      { tenantId: "tenant-canton", role: "admin" },
+      { tenantId: "tenant-riverside", role: "admin" },
+    ],
+  });
+
+  await seedUser(tx, {
+    qqUin: "40000",
+    email: "operator@example.com",
+    displayName: "系统运维",
+    systemRole: "system_operator",
+    memberships: [{ tenantId: "tenant-canton", role: "admin" }],
+  });
+
+  await seedUser(tx, {
+    qqUin: "50000",
+    email: "operations@example.com",
+    displayName: "运营管理员",
+    systemRole: "operations_admin",
+    memberships: [{ tenantId: "tenant-riverside", role: "admin" }],
+  });
+});
+
+console.log("Seeded CampuxNext demo tenants and accounts. Password for all accounts: campux123");
+
+await prisma.$disconnect();
