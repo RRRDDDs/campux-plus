@@ -93,7 +93,7 @@ const adminTabTitles: Record<AdminTab, string> = {
 export function App() {
   const [me, setMe] = useState<MeResponse | null>(null);
   const [tenants, setTenants] = useState<TenantSummary[]>([]);
-  const [authContext, setAuthContext] = useState<{ managementHost: boolean; currentTenant: TenantSummary | null; deployMode: "single" | "multi" }>({ managementHost: false, currentTenant: null, deployMode: "multi" });
+  const [authContext, setAuthContext] = useState<{ managementHost: boolean; currentTenant: TenantSummary | null; deployMode: "single" | "multi"; turnstileSiteKey: string }>({ managementHost: false, currentTenant: null, deployMode: "multi", turnstileSiteKey: "" });
   const [needsSetup, setNeedsSetup] = useState<boolean | null>(null);
   const [route, setRoute] = useState<AppRoute>(() => routeFromPath(window.location.pathname));
   const [activeTab, setActiveTabState] = useState<MainTab>(() => {
@@ -282,8 +282,8 @@ export function App() {
         const [meData, tenantData] = await Promise.all([
           api<MeResponse>("/api/me"),
           api<{ tenants: TenantSummary[] }>("/api/tenants"),
-          api<{ managementHost: boolean; currentTenant: TenantSummary | null; deployMode: "single" | "multi" }>("/api/auth/context").then((data) => {
-            if (!ignore) setAuthContext(data);
+          api<{ managementHost: boolean; currentTenant: TenantSummary | null; deployMode: "single" | "multi"; turnstileSiteKey?: string }>("/api/auth/context").then((data) => {
+            if (!ignore) setAuthContext({ ...data, turnstileSiteKey: data.turnstileSiteKey ?? "" });
             return data;
           }),
         ]);
@@ -450,12 +450,29 @@ export function App() {
     setDocumentIcon(activeLogoUrl);
   }, [activeLogoUrl]);
 
+  /**
+   * 登录/注册接口的返回里可能不带最新的申请状态（历史版本更是完全不带），
+   * 所以认证成功后一律再拉一次 /api/me 作为权威数据，避免"刚注册就能进开墙界面"。
+   */
+  async function resolveAuthoritativeMe(fallback: MeResponse): Promise<MeResponse> {
+    if (!fallback.authenticated) {
+      return fallback;
+    }
+    try {
+      const fresh = await api<MeResponse>("/api/me");
+      return fresh.authenticated ? fresh : fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
   async function login(account: string, password: string): Promise<MeResponse> {
     setError("");
-    const data = await api<MeResponse>("/api/auth/login", {
+    const response = await api<MeResponse>("/api/auth/login", {
       method: "POST",
       body: JSON.stringify({ account, password }),
     });
+    const data = await resolveAuthoritativeMe(response);
     setMe(data);
     if (data.authenticated) {
       if (data.user.passwordChangeRequired) {
@@ -474,7 +491,8 @@ export function App() {
     return data;
   }
 
-  function completeRegistration(data: MeResponse) {
+  async function completeRegistration(response: MeResponse) {
+    const data = await resolveAuthoritativeMe(response);
     setMe(data);
     setError("");
     if (data.authenticated) {
@@ -666,7 +684,7 @@ export function App() {
   }
 
   if (!me.authenticated) {
-    return <LoginScreen hostTenant={hostTenant ?? undefined} logoUrl={activeLogoUrl} error={error} managementHost={authContext.managementHost} onLogin={login} onRegistered={completeRegistration} />;
+    return <LoginScreen hostTenant={hostTenant ?? undefined} logoUrl={activeLogoUrl} error={error} managementHost={authContext.managementHost} turnstileSiteKey={authContext.turnstileSiteKey} onLogin={login} onRegistered={completeRegistration} />;
   }
 
   if (me.user.passwordChangeRequired) {
@@ -677,17 +695,17 @@ export function App() {
     return <BannedScreen ban={me.activeBan} me={me} selectedTenant={me.currentTenant} onLogout={logout} />;
   }
 
+  // 开墙申请待审核 / 被拒绝：只显示申请状态页——无论访问哪个地址都不放行其它界面。
+  if (me.canCreateTenant === false && me.memberships.length === 0) {
+    return <TenantApplicationStatusScreen me={me} onRefresh={refreshMe} onLogout={logout} />;
+  }
+
   if (route.kind === "tenants") {
     if (canOpenOps(me)) {
       return <TenantSelectionScreen me={me} onSelectTenant={selectTenant} onOpenOps={() => navigate({ kind: "ops" })} onLogout={logout} />;
     }
 
     return <TenantSelectionScreen me={me} onSelectTenant={selectTenant} onLogout={logout} />;
-  }
-
-  // 开墙申请待审核 / 被拒绝：显示申请状态页，而不是直接进入开墙引导。
-  if (me.canCreateTenant === false && me.memberships.length === 0) {
-    return <TenantApplicationStatusScreen me={me} onRefresh={refreshMe} onLogout={logout} />;
   }
 
   if (canOpenOps(me) && (route.kind === "ops" || me.memberships.length === 0)) {

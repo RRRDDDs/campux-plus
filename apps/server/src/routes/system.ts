@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { CampuxConfig } from "@campux/config";
-import { Prisma, TransactionIsolationLevel, createManyDedup } from "@campux/db";
+import { hashPassword, Prisma, TransactionIsolationLevel, createManyDedup } from "@campux/db";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { requirePlatformAdmin } from "../lib/auth";
 import { writeAuditLog } from "../lib/audit";
@@ -87,6 +88,21 @@ const tenantApplicationReviewSchema = z.object({
 const tenantDeleteSchema = z.object({
   confirmName: z.string().trim().min(1, "请输入校园墙名称以确认删除"),
   backupAcknowledged: z.boolean(),
+});
+
+/** 停用 / 恢复账号。 */
+const userDisableSchema = z.object({
+  disabled: z.boolean(),
+  reason: z.string().trim().max(200).optional(),
+});
+
+/** 删除账号：必须输入邮箱/昵称确认，并选择稿件与校园墙的处理方式。 */
+const userDeleteSchema = z.object({
+  confirm: z.string().trim().min(1, "请输入该账号的邮箱或昵称以确认删除"),
+  /** 他的稿件与竞选：一起删除 / 保留（转交「已注销账号」占位账户） */
+  posts: z.enum(["delete", "keep"]).default("delete"),
+  /** 他运营的校园墙：一起彻底删除 / 保留（管理员移交给自己） */
+  tenants: z.enum(["delete", "keep"]).default("keep"),
 });
 
 const systemUserRoleFilterSchema = platformAssignableRoleSchema;
@@ -277,6 +293,162 @@ async function collectTenantAttachmentKeys(tenantId: string): Promise<string[]> 
     pushKey(entry.value);
   }
   return [...keys];
+}
+
+/** 收集某个用户发过的稿件（与竞选）里的附件 key，用于删除账号时一并清理对象存储。 */
+async function collectUserAttachmentKeys(userId: string): Promise<string[]> {
+  const keys = new Set<string>();
+  const pushKey = (value: unknown) => {
+    if (typeof value === "string") {
+      if (value.trim().startsWith("tenants/")) {
+        keys.add(value.trim());
+      }
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        pushKey(item);
+      }
+      return;
+    }
+    if (value && typeof value === "object") {
+      const record = value as Record<string, unknown>;
+      if (typeof record.key === "string" && record.key.trim().startsWith("tenants/")) {
+        keys.add(record.key.trim());
+      }
+      for (const item of Object.values(record)) {
+        if (typeof item === "object" && item !== null) {
+          pushKey(item);
+        }
+      }
+    }
+  };
+
+  const [posts, campaigns] = await Promise.all([
+    prisma.post.findMany({ where: { authorId: userId }, select: { attachments: true } }),
+    prisma.campaign.findMany({
+      where: { authorId: userId },
+      select: { coverAttachment: true, options: { select: { imageAttachment: true } } },
+    }),
+  ]);
+  for (const post of posts) {
+    pushKey(post.attachments);
+  }
+  for (const campaign of campaigns) {
+    pushKey(campaign.coverAttachment);
+    for (const option of campaign.options) {
+      pushKey(option.imageAttachment);
+    }
+  }
+  return [...keys];
+}
+
+/** 账号关联情况（删除前的预览）。 */
+async function buildUserRelationSummary(userId: string) {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      id: true,
+      qqUin: true,
+      email: true,
+      displayName: true,
+      systemRole: true,
+      disabledAt: true,
+      createdAt: true,
+      memberships: {
+        select: {
+          id: true,
+          role: true,
+          tenant: {
+            select: {
+              id: true,
+              name: true,
+              slug: true,
+              status: true,
+              _count: { select: { posts: true, memberships: true } },
+            },
+          },
+        },
+      },
+      _count: {
+        select: {
+          posts: true,
+          campaigns: true,
+          postFollows: true,
+          campaignVotes: true,
+          confessionsSent: true,
+          confessionsReceived: true,
+          tenantApplications: true,
+          oauthIdentities: true,
+          sessions: true,
+        },
+      },
+    },
+  });
+  if (!user) {
+    return null;
+  }
+  return {
+    user: {
+      id: user.id,
+      qqUin: user.qqUin.toString(),
+      email: user.email,
+      displayName: user.displayName,
+      systemRole: user.systemRole,
+      disabledAt: user.disabledAt ? user.disabledAt.toISOString() : null,
+      createdAt: user.createdAt.toISOString(),
+    },
+    counts: {
+      posts: user._count.posts,
+      campaigns: user._count.campaigns,
+      postFollows: user._count.postFollows,
+      campaignVotes: user._count.campaignVotes,
+      confessions: user._count.confessionsSent + user._count.confessionsReceived,
+      applications: user._count.tenantApplications,
+      oauthIdentities: user._count.oauthIdentities,
+      sessions: user._count.sessions,
+      memberships: user.memberships.length,
+    },
+    administeredTenants: user.memberships
+      .filter((membership) => membership.role === "admin")
+      .map((membership) => ({
+        id: membership.tenant.id,
+        name: membership.tenant.name,
+        slug: membership.tenant.slug,
+        status: membership.tenant.status,
+        postCount: membership.tenant._count.posts,
+        memberCount: membership.tenant._count.memberships,
+      })),
+    memberships: user.memberships.map((membership) => ({
+      id: membership.id,
+      role: membership.role,
+      tenantName: membership.tenant.name,
+      tenantSlug: membership.tenant.slug,
+    })),
+  };
+}
+
+/** 删除账号时把稿件转交到的占位账户（不可登录）。 */
+async function ensureDeletedUserPlaceholder() {
+  const existing = await prisma.user.findFirst({
+    where: { displayName: "已注销账号", systemRole: null, email: null },
+    select: { id: true },
+  });
+  if (existing) {
+    return existing.id;
+  }
+  const created = await prisma.user.create({
+    data: {
+      qqUin: BigInt(`9${Date.now().toString().slice(-11)}`),
+      email: null,
+      displayName: "已注销账号",
+      passwordHash: await hashPassword(randomUUID()),
+      isTestAccount: false,
+      systemRole: null,
+    },
+    select: { id: true },
+  });
+  return created.id;
 }
 
 async function getManagementHost() {
@@ -1257,6 +1429,191 @@ export function registerSystemRoutes(app: FastifyInstance, queue: RuntimeQueue, 
 
     return {
       ok: true,
+    };
+  });
+
+  // ── 停用 / 恢复账号（仅系统运维）───────────────────────
+  app.post("/api/system/users/:userId/disabled", async (request, reply) => {
+    const context = await requireSystemOperatorContext(request, reply);
+    const params = z.object({ userId: z.string().min(1) }).parse(request.params);
+    const body = userDisableSchema.parse(request.body ?? {});
+    const user = await prisma.user.findUnique({
+      where: { id: params.userId },
+      select: { id: true, systemRole: true, email: true, displayName: true, disabledAt: true },
+    });
+    if (!user) {
+      return reply.code(404).send({ message: "用户不存在" });
+    }
+    if (user.id === context.user.id) {
+      return reply.code(400).send({ message: "不能停用自己的账号" });
+    }
+    if (user.systemRole === "system_operator") {
+      return reply.code(403).send({ message: "系统运维账号不能被停用" });
+    }
+
+    const updated = await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        disabledAt: body.disabled ? new Date() : null,
+        disabledReason: body.disabled ? (body.reason?.trim() || null) : null,
+      },
+      select: { disabledAt: true },
+    });
+    if (body.disabled) {
+      // 立即踢下线
+      await prisma.accountSession.deleteMany({ where: { userId: user.id } });
+    }
+    await writeAuditLog({
+      tenantId: null,
+      actorId: context.user.id,
+      action: body.disabled ? "system.user.disable" : "system.user.enable",
+      targetType: "user",
+      targetId: user.id,
+      detail: {
+        email: user.email,
+        displayName: user.displayName,
+        reason: body.disabled ? (body.reason?.trim() || null) : null,
+      },
+    });
+    return {
+      ok: true,
+      disabledAt: updated.disabledAt ? updated.disabledAt.toISOString() : null,
+    };
+  });
+
+  // ── 删除账号前的关联预览（仅系统运维）──────────────────
+  app.get("/api/system/users/:userId/relations", async (request, reply) => {
+    await requireSystemOperatorContext(request, reply);
+    const params = z.object({ userId: z.string().min(1) }).parse(request.params);
+    const summary = await buildUserRelationSummary(params.userId);
+    if (!summary) {
+      return reply.code(404).send({ message: "用户不存在" });
+    }
+    return summary;
+  });
+
+  // ── 删除账号（仅系统运维，需按选项处理关联数据）────────
+  app.delete("/api/system/users/:userId", async (request, reply) => {
+    const context = await requireSystemOperatorContext(request, reply);
+    const params = z.object({ userId: z.string().min(1) }).parse(request.params);
+    const body = userDeleteSchema.parse(request.body ?? {});
+    const user = await prisma.user.findUnique({
+      where: { id: params.userId },
+      select: {
+        id: true,
+        qqUin: true,
+        email: true,
+        displayName: true,
+        systemRole: true,
+        memberships: { select: { id: true, role: true, tenantId: true, tenant: { select: { id: true, name: true, slug: true, status: true } } } },
+      },
+    });
+    if (!user) {
+      return reply.code(404).send({ message: "用户不存在" });
+    }
+    if (user.id === context.user.id) {
+      return reply.code(400).send({ message: "不能删除自己的账号" });
+    }
+    if (user.systemRole === "system_operator") {
+      return reply.code(403).send({ message: "系统运维账号不能被删除" });
+    }
+    const confirmTargets = [user.email, user.displayName, user.qqUin.toString()].filter(
+      (value): value is string => Boolean(value),
+    );
+    if (!confirmTargets.includes(body.confirm.trim())) {
+      return reply.code(400).send({ code: "confirm_mismatch", message: "输入的内容与该账号不一致" });
+    }
+
+    const administered = user.memberships.filter((membership) => membership.role === "admin");
+    const deletedTenants: string[] = [];
+    const transferredTenants: string[] = [];
+
+    if (body.tenants === "delete") {
+      for (const membership of administered) {
+        const attachmentKeys = await collectTenantAttachmentKeys(membership.tenantId).catch(() => [] as string[]);
+        if (attachmentKeys.length > 0) {
+          await deleteAttachmentObjects(config, attachmentKeys).catch((error) => {
+            request.log.warn({ error, tenantId: membership.tenantId }, "failed to delete tenant attachments while deleting user");
+          });
+        }
+        await prisma.tenant.delete({ where: { id: membership.tenantId } });
+        await writeAuditLog({
+          tenantId: null,
+          actorId: context.user.id,
+          action: "tenant.delete",
+          targetType: "tenant",
+          targetId: membership.tenantId,
+          detail: { name: membership.tenant.name, slug: membership.tenant.slug, viaUserDelete: user.id },
+        });
+        deletedTenants.push(membership.tenant.name);
+      }
+    } else {
+      for (const membership of administered) {
+        const otherAdmins = await prisma.tenantMembership.count({
+          where: { tenantId: membership.tenantId, role: "admin", NOT: { userId: user.id } },
+        });
+        if (otherAdmins === 0) {
+          // 这是该墙唯一的管理员：把管理员身份移交给操作者（系统运维），保留校园墙。
+          await prisma.tenantMembership.upsert({
+            where: { tenantId_userId: { tenantId: membership.tenantId, userId: context.user.id } },
+            update: { role: "admin" },
+            create: { tenantId: membership.tenantId, userId: context.user.id, role: "admin" },
+          });
+          transferredTenants.push(membership.tenant.name);
+        }
+      }
+    }
+
+    let deletedPosts = 0;
+    let reassignedPosts = 0;
+    if (body.posts === "delete") {
+      const attachmentKeys = await collectUserAttachmentKeys(user.id).catch(() => [] as string[]);
+      if (attachmentKeys.length > 0) {
+        await deleteAttachmentObjects(config, attachmentKeys).catch((error) => {
+          request.log.warn({ error, userId: user.id }, "failed to delete user attachments");
+        });
+      }
+      const [postResult, campaignResult] = await prisma.$transaction([
+        prisma.post.deleteMany({ where: { authorId: user.id } }),
+        prisma.campaign.deleteMany({ where: { authorId: user.id } }),
+      ]);
+      deletedPosts = postResult.count;
+      void campaignResult;
+    } else {
+      const placeholderId = await ensureDeletedUserPlaceholder();
+      const [postResult, campaignResult] = await prisma.$transaction([
+        prisma.post.updateMany({ where: { authorId: user.id }, data: { authorId: placeholderId } }),
+        prisma.campaign.updateMany({ where: { authorId: user.id }, data: { authorId: placeholderId } }),
+      ]);
+      reassignedPosts = postResult.count;
+      void campaignResult;
+    }
+
+    await prisma.user.delete({ where: { id: user.id } });
+    await writeAuditLog({
+      tenantId: null,
+      actorId: context.user.id,
+      action: "system.user.delete",
+      targetType: "user",
+      targetId: user.id,
+      detail: {
+        email: user.email,
+        displayName: user.displayName,
+        qqUin: user.qqUin.toString(),
+        options: { posts: body.posts, tenants: body.tenants },
+        deletedTenants,
+        transferredTenants,
+        deletedPosts,
+        reassignedPosts,
+      },
+    });
+
+    return {
+      ok: true,
+      deletedTenants,
+      transferredTenants,
+      deletedPosts,
+      reassignedPosts,
     };
   });
 

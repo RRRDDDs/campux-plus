@@ -25,6 +25,8 @@ CREATE TABLE "User" (
     "autoFollowOwnPosts" BOOLEAN NOT NULL DEFAULT true,
     "isTestAccount" BOOLEAN NOT NULL DEFAULT false,
     "systemRole" TEXT,
+    "disabledAt" DATETIME,
+    "disabledReason" TEXT,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

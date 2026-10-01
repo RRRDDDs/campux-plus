@@ -24,6 +24,10 @@ const configSchema = z.object({
   CAMPUX_DB_PROVIDER: z.enum(["sqlite", "postgresql"]).optional(),
   RESEND_API_KEY: z.string().optional(),
   RESEND_FROM_EMAIL: z.string().default("Campux <noreply@campux.top>"),
+  // Cloudflare Turnstile：配置后，「申请开墙」注册表单会要求通过人机验证。
+  // 只配了 site key（前端）不配 secret 时会视为未启用，避免前端显示验证码但服务端不校验。
+  CAMPUX_TURNSTILE_SITE_KEY: z.string().optional(),
+  CAMPUX_TURNSTILE_SECRET_KEY: z.string().optional(),
   // Required in production (see ensureBotSessionSecretConfigured); used to
   // encrypt stored bot session cookies. Read here so it is validated/visible
   // centrally even though secret-json.ts also reads process.env directly.
@@ -161,6 +165,12 @@ export function loadConfig() {
     resend: {
       apiKey: env.RESEND_API_KEY,
       fromEmail: env.RESEND_FROM_EMAIL,
+    },
+    turnstile: {
+      // 只有 site key 与 secret key 都配置时才启用（否则前端不渲染、服务端不校验）。
+      siteKey: nonEmpty(env.CAMPUX_TURNSTILE_SITE_KEY) ?? "",
+      secretKey: nonEmpty(env.CAMPUX_TURNSTILE_SECRET_KEY) ?? "",
+      enabled: Boolean(nonEmpty(env.CAMPUX_TURNSTILE_SITE_KEY) && nonEmpty(env.CAMPUX_TURNSTILE_SECRET_KEY)),
     },
     buildVersion: env.CAMPUX_BUILD_VERSION ?? "dev",
     telemetry: {

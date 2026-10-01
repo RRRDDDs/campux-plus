@@ -38,6 +38,10 @@ export function TenantApplicationStatusScreen({
       toast.error("请填写想开的校园墙名称");
       return;
     }
+    if (contact.trim().length < 2) {
+      toast.error("请填写联系方式（QQ / 微信 / 手机号），方便系统运维联系你");
+      return;
+    }
     setBusy(true);
     try {
       await api("/api/me/tenant-application", {
@@ -122,7 +126,7 @@ export function TenantApplicationStatusScreen({
                   <div className="grid gap-2 rounded-md border border-slate-200 p-3">
                     <Input value={wallName} placeholder="想开的校园墙名称（必填）" onChange={(event) => setWallName(event.target.value)} />
                     <Input value={school} placeholder="学校 / 单位（选填）" onChange={(event) => setSchool(event.target.value)} />
-                    <Input value={contact} placeholder="联系方式（选填）" onChange={(event) => setContact(event.target.value)} />
+                    <Input value={contact} placeholder="联系方式（必填：QQ / 微信 / 手机号）" onChange={(event) => setContact(event.target.value)} />
                     <Textarea
                       className="min-h-20 text-sm"
                       value={reason}

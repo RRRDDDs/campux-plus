@@ -1306,6 +1306,15 @@ export class OneBotRuntime {
     try {
       const bot = await findEnabledBot(botQqUin);
 
+      // 平台级停用：被停用的账号即使发消息也不处理（静默忽略，避免刷屏）。
+      const disabledSender = await prisma.user.findUnique({
+        where: { qqUin: BigInt(userQqUin) },
+        select: { disabledAt: true },
+      }).catch(() => null);
+      if (disabledSender?.disabledAt) {
+        return;
+      }
+
       // 触发插件事件：Bot 收到私聊消息
       this.pluginEvents?.emit({
         type: "bot:message_received",

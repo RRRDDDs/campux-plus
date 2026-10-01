@@ -90,12 +90,39 @@
 - 每个账号默认只能开 1 个校园墙（判定方式：当前没有任何以 admin 身份参与的墙）；历史账号不受影响，但同样无法再开第二个。
 - 删除校园墙要求「先下载备份 → 勾选确认 → 输入墙名完全一致」，删除数据库数据与对象存储附件，并在审计日志写入 `tenant.delete`（保留墙名、标识与附件数量）。
 
-## 四、仓库层面的调整
+## 四、账号治理：停用 / 删除账号 + 注册人机验证
+
+新增文件：
+
+- `packages/db/prisma/migrations/20261001150000_add_user_disable/migration.sql` —— `User` 增加 `disabledAt` / `disabledReason`。
+- `apps/server/src/lib/rate-limit.ts` —— 进程内限流 + 客户端 IP 解析（优先 `cf-connecting-ip`）。
+- `apps/server/src/lib/turnstile.ts` —— Cloudflare Turnstile 服务端校验（网络异常时放行，不挡正常用户）。
+- `apps/web/src/features/auth/TurnstileWidget.tsx` —— 注册表单的人机验证控件（未配置 site key 时不渲染）。
+
+修改文件：
+
+- `packages/config/src/index.ts` —— 新增 `CAMPUX_TURNSTILE_SITE_KEY` / `CAMPUX_TURNSTILE_SECRET_KEY` 与 `config.turnstile`。
+- `apps/server/src/routes/auth.ts` —— 注册去掉邮箱验证码；启用 Turnstile 后校验 token；同一来源每小时最多 5 次注册；
+  登录时拒绝已停用账号；`/api/auth/context` 下发 Turnstile site key；注册返回里带上申请状态。
+- `apps/server/src/lib/auth.ts` —— 会话校验发现账号被停用时，视为未登录并清空该账号会话。
+- `apps/server/src/routes/system.ts` —— 新增停用/恢复、账号关联预览、按选项删除账号三个接口。
+- `apps/server/src/runtime/onebot.ts` —— 被停用账号的私聊消息静默忽略。
+- 前端：`App.tsx`（认证后以 `/api/me` 为准、待审核判断提前）、`LoginScreen.tsx`（去掉验证码、接入 Turnstile）、
+  `OpsPanel.tsx`（停用/恢复、删除账号对话框与关联预览）、`types/app.ts`。
+
+行为要点：
+
+- 停用账号：立即踢下线、禁止登录、机器人侧忽略；数据保留、可恢复；不能停用系统运维账号或自己。
+- 删除账号：先展示关联情况，再由操作者决定「稿件一起删 / 保留转交」与「校园墙移交 / 一起删除」，
+  最后输入邮箱或昵称确认；不能删除系统运维账号或自己。
+- 注册：不再需要邮箱验证码；人机验证未配置时自动降级，仅保留限流。
+
+## 五、仓库层面的调整
 
 - 重写 `README.md` 为二次开发版本，`DEPLOY.md` 为新写的部署教程，新增 `NOTICE`（Apache-2.0 要求的修改声明）与本文件。
 - 移除 `.github/workflows`、`.github/actions`（上游面向官方镜像/发布流程，放到个人仓库只会产生失败任务）。
 
-## 五、上游本体改动说明
+## 六、上游本体改动说明
 
 上游在同一时期仍在持续更新（本仓库基线之后上游又有新提交）。若你希望跟进上游，
 可以参考 `NOTICE` 里列出的文件清单，把本仓库的改动以补丁形式合并到最新上游代码上。

@@ -10,6 +10,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ThemeModeButton } from "@/features/theme/ThemeModeControl";
 import { AggregateLoginButtons } from "@/features/aggregate-oauth/LoginButtons";
+import { TurnstileWidget } from "./TurnstileWidget";
 
 const CREDENTIALS_KEY = "campux.loginCredentials.v1";
 
@@ -55,6 +56,7 @@ export function LoginScreen({
   logoUrl,
   error,
   managementHost,
+  turnstileSiteKey,
   onLogin,
   onRegistered,
 }: {
@@ -62,6 +64,8 @@ export function LoginScreen({
   logoUrl: string;
   error: string;
   managementHost: boolean;
+  /** Cloudflare Turnstile site key；为空表示未启用人机验证 */
+  turnstileSiteKey: string;
   onLogin: (account: string, password: string) => Promise<MeResponse>;
   onRegistered: (data: MeResponse) => void;
 }) {
@@ -153,7 +157,7 @@ export function LoginScreen({
                 返回登录
               </button>
             </div>
-            <RegisterPanel onRegistered={onRegistered} />
+            <RegisterPanel onRegistered={onRegistered} turnstileSiteKey={turnstileSiteKey} />
             <div className="mt-5 border-t border-slate-100 pt-3 text-center">
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -233,34 +237,20 @@ export function LoginScreen({
   );
 }
 
-function RegisterPanel({ onRegistered }: { onRegistered: (data: MeResponse) => void }) {
+function RegisterPanel({ onRegistered, turnstileSiteKey }: { onRegistered: (data: MeResponse) => void; turnstileSiteKey: string }) {
   const [email, setEmail] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [password, setPassword] = useState("");
-  const [code, setCode] = useState("");
   const [wallName, setWallName] = useState("");
   const [school, setSchool] = useState("");
   const [contact, setContact] = useState("");
   const [reason, setReason] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
-  const [sendingCode, setSendingCode] = useState(false);
-
-  async function requestCode() {
-    setSendingCode(true);
-    setMessage("");
-    try {
-      const data = await api<{ ok: true; devCode?: string }>("/api/auth/register/request-code", {
-        method: "POST",
-        body: JSON.stringify({ email }),
-      });
-      setMessage(data.devCode ? `开发环境验证码：${data.devCode}` : "验证码已发送，请检查邮箱。");
-    } catch (caught) {
-      setMessage(caught instanceof Error ? caught.message : "验证码发送失败");
-    } finally {
-      setSendingCode(false);
-    }
-  }
+  const [turnstileToken, setTurnstileToken] = useState("");
+  // 验证 token 是一次性的：提交失败后通过改 key 让控件重新取一个。
+  const [turnstileKey, setTurnstileKey] = useState(0);
+  const turnstileRequired = turnstileSiteKey.length > 0;
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -273,16 +263,18 @@ function RegisterPanel({ onRegistered }: { onRegistered: (data: MeResponse) => v
           email,
           displayName,
           password,
-          code,
           wallName,
           school,
           contact,
           reason,
+          ...(turnstileToken ? { turnstileToken } : {}),
         }),
       });
       onRegistered(data);
     } catch (caught) {
       setMessage(caught instanceof Error ? caught.message : "注册失败");
+      setTurnstileToken("");
+      setTurnstileKey((key) => key + 1);
     } finally {
       setBusy(false);
     }
@@ -290,13 +282,7 @@ function RegisterPanel({ onRegistered }: { onRegistered: (data: MeResponse) => v
 
   return (
     <form className="mt-4 grid gap-3" onSubmit={submit}>
-      <Input value={email} type="email" placeholder="邮箱" onChange={(event) => setEmail(event.target.value)} />
-      <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
-        <Input value={code} inputMode="numeric" placeholder="邮箱验证码" onChange={(event) => setCode(event.target.value)} />
-        <Button type="button" variant="outline" disabled={sendingCode || email.trim().length === 0} onClick={() => void requestCode()}>
-          {sendingCode ? "发送中" : "获取验证码"}
-        </Button>
-      </div>
+      <Input value={email} type="email" placeholder="邮箱（用作登录账号）" onChange={(event) => setEmail(event.target.value)} />
       <Input value={displayName} placeholder="账户名称" onChange={(event) => setDisplayName(event.target.value)} />
       <Input value={password} type="password" placeholder="密码，至少 6 位" onChange={(event) => setPassword(event.target.value)} />
       <div className="mt-1 rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
@@ -304,7 +290,7 @@ function RegisterPanel({ onRegistered }: { onRegistered: (data: MeResponse) => v
         <div className="mt-2 grid gap-2">
           <Input value={wallName} placeholder="想开的校园墙名称（必填，如：XX中学万能墙）" onChange={(event) => setWallName(event.target.value)} />
           <Input value={school} placeholder="学校 / 单位（选填）" onChange={(event) => setSchool(event.target.value)} />
-          <Input value={contact} placeholder="联系方式（选填，方便运维联系你）" onChange={(event) => setContact(event.target.value)} />
+          <Input value={contact} placeholder="联系方式（必填：QQ / 微信 / 手机号）" onChange={(event) => setContact(event.target.value)} />
           <Textarea
             className="min-h-20 text-sm"
             value={reason}
@@ -314,10 +300,26 @@ function RegisterPanel({ onRegistered }: { onRegistered: (data: MeResponse) => v
           />
         </div>
       </div>
+      <TurnstileWidget key={turnstileKey} siteKey={turnstileSiteKey} onToken={setTurnstileToken} />
       {message ? <p className="text-sm font-medium text-slate-600">{message}</p> : null}
-      <Button className="font-medium" disabled={busy || email.trim().length === 0 || code.trim().length !== 6 || displayName.trim().length === 0 || password.length < 6 || wallName.trim().length < 2} type="submit">
+      <Button
+        className="font-medium"
+        disabled={
+          busy
+          || email.trim().length === 0
+          || displayName.trim().length === 0
+          || password.length < 6
+          || wallName.trim().length < 2
+          || contact.trim().length < 2
+          || (turnstileRequired && turnstileToken.length === 0)
+        }
+        type="submit"
+      >
         {busy ? "提交中" : "提交申请"}
       </Button>
+      <p className="text-xs text-slate-400">
+        提交即表示同意由系统运维审核你的开墙申请；邮箱仅作为登录账号，不再发送验证码。
+      </p>
     </form>
   );
 }

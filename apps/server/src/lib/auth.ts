@@ -136,6 +136,12 @@ export async function getSessionContext(request: FastifyRequest) {
     return null;
   }
 
+  // 账号被系统运维停用：立即视为未登录，并清掉该账号的所有会话。
+  if (session.user.disabledAt) {
+    await prisma.accountSession.deleteMany({ where: { userId: session.user.id } });
+    return null;
+  }
+
   const hostTenant = await findTenantByRequestHost(request);
   if (hostTenant) {
     const hostMembership = session.user.memberships.find((membership) => membership.tenantId === hostTenant.id);

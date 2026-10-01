@@ -877,6 +877,9 @@ export type SystemUser = {
   systemRole: SystemRole | null;
   isTestAccount: boolean;
   createdAt: string;
+  /** 非空表示账号被系统运维停用（禁止登录，数据保留） */
+  disabledAt?: string | null;
+  disabledReason?: string | null;
   memberships: Array<{
     id: string;
     role: TenantRole;
@@ -886,6 +889,44 @@ export type SystemUser = {
       slug: string;
       status: TenantStatus;
     };
+  }>;
+};
+
+/** 删除账号前的关联预览 */
+export type SystemUserRelations = {
+  user: {
+    id: string;
+    qqUin: string;
+    email: string | null;
+    displayName: string | null;
+    systemRole: SystemRole | null;
+    disabledAt: string | null;
+    createdAt: string;
+  };
+  counts: {
+    posts: number;
+    campaigns: number;
+    postFollows: number;
+    campaignVotes: number;
+    confessions: number;
+    applications: number;
+    oauthIdentities: number;
+    sessions: number;
+    memberships: number;
+  };
+  administeredTenants: Array<{
+    id: string;
+    name: string;
+    slug: string;
+    status: TenantStatus;
+    postCount: number;
+    memberCount: number;
+  }>;
+  memberships: Array<{
+    id: string;
+    role: TenantRole;
+    tenantName: string;
+    tenantSlug: string;
   }>;
 };
 

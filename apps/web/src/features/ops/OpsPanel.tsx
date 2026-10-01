@@ -33,7 +33,7 @@ import {
 import { buildOverviewTenantNavigation } from "./overview-tenant-navigation";
 import { createLatestRequestGate } from "./latest-request-gate";
 import { summarizeTenantRuntime } from "./tenant-runtime-summary";
-import type { AuditLogItem, Pagination, SystemQueueSnapshot, SystemRole, SystemTenant, SystemUser, TenantRole, TenantStatus } from "@/types/app";
+import type { AuditLogItem, Pagination, SystemQueueSnapshot, SystemRole, SystemTenant, SystemUser, SystemUserRelations, TenantRole, TenantStatus } from "@/types/app";
 import { PaginationControls } from "@/components/app/utility";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -223,6 +223,14 @@ export function OpsPanel({
   const [tenantDeleteConfirmName, setTenantDeleteConfirmName] = useState("");
   const [tenantDeleteAck, setTenantDeleteAck] = useState(false);
   const [deletingTenant, setDeletingTenant] = useState(false);
+  const [userActionBusyKey, setUserActionBusyKey] = useState("");
+  const [deleteUserTarget, setDeleteUserTarget] = useState<SystemUser | null>(null);
+  const [deleteUserRelations, setDeleteUserRelations] = useState<SystemUserRelations | null>(null);
+  const [deleteUserLoading, setDeleteUserLoading] = useState(false);
+  const [deleteUserPosts, setDeleteUserPosts] = useState<"delete" | "keep">("delete");
+  const [deleteUserTenants, setDeleteUserTenants] = useState<"delete" | "keep">("keep");
+  const [deleteUserConfirm, setDeleteUserConfirm] = useState("");
+  const [deletingUser, setDeletingUser] = useState(false);
   const [loadingOverview, setLoadingOverview] = useState(false);
   const [loadingSettings, setLoadingSettings] = useState(false);
   const [loadingUsers, setLoadingUsers] = useState(false);
@@ -515,6 +523,94 @@ export function OpsPanel({
       toast.error(caught instanceof Error ? caught.message : "删除失败");
     } finally {
       setDeletingTenant(false);
+    }
+  }
+
+  /** 停用 / 恢复账号（仅系统运维；数据保留，可随时恢复）。 */
+  async function toggleUserDisabled(user: SystemUser) {
+    if (userActionBusyKey) {
+      return;
+    }
+    const nextDisabled = !user.disabledAt;
+    let reason = "";
+    if (nextDisabled) {
+      const input = window.prompt("停用该账号并填写原因（会展示给对方）：", "违反平台规则");
+      if (input === null) {
+        return;
+      }
+      reason = input.trim();
+    } else if (!window.confirm(`确认恢复账号「${user.displayName ?? user.email ?? user.qqUin}」？`)) {
+      return;
+    }
+    setUserActionBusyKey(`disable:${user.id}`);
+    try {
+      await api(`/api/system/users/${user.id}/disabled`, {
+        method: "POST",
+        body: JSON.stringify({ disabled: nextDisabled, ...(reason ? { reason } : {}) }),
+      });
+      toast.success(nextDisabled ? "已停用该账号，对方将无法登录。" : "已恢复该账号。");
+      await refreshUsers(userPage);
+      await refreshAudit(1);
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "操作失败");
+    } finally {
+      setUserActionBusyKey("");
+    }
+  }
+
+  /** 打开删除账号对话框：先拉取关联预览，让运维决定稿件/校园墙怎么处理。 */
+  async function openDeleteUserDialog(user: SystemUser) {
+    setDeleteUserTarget(user);
+    setDeleteUserRelations(null);
+    setDeleteUserConfirm("");
+    setDeleteUserPosts("delete");
+    setDeleteUserTenants("keep");
+    setDeleteUserLoading(true);
+    try {
+      const data = await api<SystemUserRelations>(`/api/system/users/${user.id}/relations`);
+      setDeleteUserRelations(data);
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "读取账号关联失败");
+    } finally {
+      setDeleteUserLoading(false);
+    }
+  }
+
+  async function confirmDeleteUser() {
+    if (!deleteUserTarget || deletingUser) {
+      return;
+    }
+    setDeletingUser(true);
+    try {
+      const result = await api<{
+        deletedTenants: string[];
+        transferredTenants: string[];
+        deletedPosts: number;
+        reassignedPosts: number;
+      }>(`/api/system/users/${deleteUserTarget.id}`, {
+        method: "DELETE",
+        body: JSON.stringify({
+          confirm: deleteUserConfirm.trim(),
+          posts: deleteUserPosts,
+          tenants: deleteUserTenants,
+        }),
+      });
+      const tenantNote = result.deletedTenants.length > 0
+        ? `，同时删除了校园墙：${result.deletedTenants.join("、")}`
+        : result.transferredTenants.length > 0
+          ? `，校园墙已移交给你：${result.transferredTenants.join("、")}`
+          : "";
+      const postNote = deleteUserPosts === "delete" ? `，删除稿件 ${result.deletedPosts} 篇` : `，保留稿件 ${result.reassignedPosts} 篇（转交「已注销账号」）`;
+      toast.success(`账号已删除${postNote}${tenantNote}。`);
+      setDeleteUserTarget(null);
+      setDeleteUserRelations(null);
+      await refreshUsers(userPage);
+      await refreshOverview();
+      await refreshAudit(1);
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "删除账号失败");
+    } finally {
+      setDeletingUser(false);
     }
   }
 
@@ -1480,6 +1576,11 @@ ${impact}`)) {
                   onRevokeMembership={revokeUserTenantMembership}
                   onPageChange={setUserPage}
                   onToggleRoleFilter={toggleUserRoleFilter}
+                  currentUserId={currentUserId}
+                  isSystemMode={isSystemMode}
+                  userActionBusyKey={userActionBusyKey}
+                  onToggleDisabled={(user) => void toggleUserDisabled(user)}
+                  onOpenDelete={(user) => void openDeleteUserDialog(user)}
                 />
               </CardContent>
             </Card>
@@ -1634,6 +1735,136 @@ ${impact}`)) {
               onClick={() => void deleteSelectedTenant()}
             >
               {deletingTenant ? "删除中…" : "确认彻底删除"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(deleteUserTarget)} onOpenChange={(open) => !open && !deletingUser && setDeleteUserTarget(null)}>
+        <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>删除账号</DialogTitle>
+            <DialogDescription>
+              先确认这个账号关联了什么，再决定这些数据怎么处理。删除后无法恢复（平台审计日志会保留一条记录）。
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-3">
+            <div className="rounded-md bg-slate-50 p-3 text-sm">
+              <p className="font-semibold text-slate-900">
+                {deleteUserTarget?.displayName ?? "未设置昵称"}
+                <span className="ml-2 font-normal text-slate-500">
+                  {deleteUserTarget?.email ?? "无邮箱"} · QQ {deleteUserTarget?.qqUin}
+                </span>
+              </p>
+              {deleteUserRelations ? (
+                <p className="mt-1 text-xs text-slate-500">
+                  创建于 {formatDateTime(deleteUserRelations.user.createdAt)}；
+                  稿件 {deleteUserRelations.counts.posts} 篇、竞选 {deleteUserRelations.counts.campaigns} 个、
+                  墙内身份 {deleteUserRelations.counts.memberships} 个、开墙申请 {deleteUserRelations.counts.applications} 条、
+                  表白记录 {deleteUserRelations.counts.confessions} 条。
+                </p>
+              ) : (
+                <p className="mt-1 text-xs text-slate-500">{deleteUserLoading ? "正在读取关联数据…" : "未能读取关联数据"}</p>
+              )}
+            </div>
+
+            {deleteUserRelations && deleteUserRelations.administeredTenants.length > 0 ? (
+              <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                <p className="font-semibold">他正在运营这些校园墙：</p>
+                <ul className="mt-1 grid gap-0.5 text-xs">
+                  {deleteUserRelations.administeredTenants.map((tenant) => (
+                    <li key={tenant.id}>
+                      {tenant.name}（{tenant.slug}，{tenant.postCount} 篇稿件 / {tenant.memberCount} 位成员）
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+
+            <fieldset className="grid gap-2 rounded-md border border-slate-200 p-3">
+              <legend className="px-1 text-xs font-semibold text-slate-600">他发过的稿件与竞选怎么处理？</legend>
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  type="radio"
+                  className="mt-1"
+                  checked={deleteUserPosts === "delete"}
+                  onChange={() => setDeleteUserPosts("delete")}
+                />
+                <span>
+                  一起删除（含图片附件）
+                  <span className="block text-xs text-slate-500">彻底删除选项：稿件、竞选及其图片一并清除。</span>
+                </span>
+              </label>
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  type="radio"
+                  className="mt-1"
+                  checked={deleteUserPosts === "keep"}
+                  onChange={() => setDeleteUserPosts("keep")}
+                />
+                <span>
+                  保留稿件，转交给「已注销账号」
+                  <span className="block text-xs text-slate-500">墙上的内容继续可见，只是署名变成已注销账号。</span>
+                </span>
+              </label>
+            </fieldset>
+
+            <fieldset className="grid gap-2 rounded-md border border-slate-200 p-3">
+              <legend className="px-1 text-xs font-semibold text-slate-600">他运营的校园墙怎么处理？</legend>
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  type="radio"
+                  className="mt-1"
+                  checked={deleteUserTenants === "keep"}
+                  onChange={() => setDeleteUserTenants("keep")}
+                />
+                <span>
+                  保留校园墙，管理员移交给我
+                  <span className="block text-xs text-slate-500">推荐：墙和里面的稿件、用户都不受影响，你成为该墙管理员。</span>
+                </span>
+              </label>
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  type="radio"
+                  className="mt-1"
+                  checked={deleteUserTenants === "delete"}
+                  onChange={() => setDeleteUserTenants("delete")}
+                />
+                <span>
+                  连同校园墙一起彻底删除
+                  <span className="block text-xs text-rose-600">慎用：该墙的稿件、成员关系、机器人配置与图片都会被清除。</span>
+                </span>
+              </label>
+            </fieldset>
+
+            <label className="grid gap-1 text-sm font-medium">
+              输入该账号的邮箱或昵称确认
+              <Input
+                value={deleteUserConfirm}
+                placeholder={deleteUserTarget?.email ?? deleteUserTarget?.displayName ?? deleteUserTarget?.qqUin ?? ""}
+                onChange={(event) => setDeleteUserConfirm(event.target.value)}
+              />
+            </label>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" disabled={deletingUser} onClick={() => setDeleteUserTarget(null)}>
+              取消
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={
+                deletingUser
+                || !deleteUserTarget
+                || !deleteUserRelations
+                || ![deleteUserTarget.email, deleteUserTarget.displayName, deleteUserTarget.qqUin]
+                  .filter((value): value is string => Boolean(value))
+                  .includes(deleteUserConfirm.trim())
+              }
+              onClick={() => void confirmDeleteUser()}
+            >
+              {deletingUser ? "删除中…" : deleteUserTenants === "delete" ? "彻底删除账号与校园墙" : "删除账号"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1975,6 +2206,11 @@ function GlobalUsersTable({
   onRevokeMembership,
   onPageChange,
   onToggleRoleFilter,
+  currentUserId,
+  isSystemMode,
+  userActionBusyKey,
+  onToggleDisabled,
+  onOpenDelete,
 }: {
   users: SystemUser[];
   loading: boolean;
@@ -1994,6 +2230,11 @@ function GlobalUsersTable({
   onRevokeMembership: (user: SystemUser, membership: SystemUser["memberships"][number]) => void;
   onPageChange: (page: number) => void;
   onToggleRoleFilter: (role: SystemUserRoleFilter) => void;
+  currentUserId: string;
+  isSystemMode: boolean;
+  userActionBusyKey: string;
+  onToggleDisabled: (user: SystemUser) => void;
+  onOpenDelete: (user: SystemUser) => void;
 }) {
   const visibleTenantIds = useMemo(() => new Set(tenants.map((tenant) => tenant.id)), [tenants]);
 
@@ -2102,6 +2343,7 @@ function GlobalUsersTable({
                   {user.systemRole === "operations_admin" ? <Badge variant="secondary">运营管理员</Badge> : null}
                   {user.systemRole === "system_operator" ? <Badge variant="secondary">系统运维</Badge> : null}
                   {user.isTestAccount ? <Badge variant="outline">测试账号</Badge> : null}
+                  {user.disabledAt ? <Badge variant="outline" className="border-rose-200 bg-rose-50 text-rose-700">已停用</Badge> : null}
                   {visibleMemberships.length === 0 ? <Badge variant="outline">未加入租户</Badge> : null}
                   {visibleMemberships.slice(0, 4).map((membership) => (
                     <span key={membership.id} className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2 py-0.5 text-xs font-semibold text-slate-700">
@@ -2126,6 +2368,30 @@ function GlobalUsersTable({
                   <ShieldPlusIcon data-icon="inline-start" />
                   添加身份
                 </Button>
+                {isSystemMode && user.id !== currentUserId && user.systemRole !== "system_operator" ? (
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 px-2 text-xs"
+                      disabled={userActionBusyKey === `disable:${user.id}`}
+                      onClick={() => onToggleDisabled(user)}
+                    >
+                      {user.disabledAt ? "恢复账号" : "停用账号"}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 border-rose-200 px-2 text-xs text-rose-700 hover:bg-rose-50"
+                      onClick={() => onOpenDelete(user)}
+                    >
+                      删除账号
+                    </Button>
+                  </div>
+                ) : null}
+                {user.disabledAt && user.disabledReason ? (
+                  <p className="mt-1 text-xs text-rose-600">停用原因：{user.disabledReason}</p>
+                ) : null}
               </div>
             </div>
           );

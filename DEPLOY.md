@@ -353,6 +353,36 @@ bun run build:binary        # 产物在 release/ 目录
 `apps/server/src/lib/tenant-application.ts` 里 `resolveTenantCreationPermission` 的配额判断即可
 （改成从租户/系统设置里读取额度也很容易）。
 
+### 4.4 注册人机验证与账号治理
+
+**注册人机验证（Cloudflare Turnstile，可选但推荐）**
+
+1. 在 Cloudflare 后台 → **Turnstile** → 添加站点，域名填你的墙域名（例如 `example.com`），
+   拿到 **Site Key** 与 **Secret Key**。
+2. 写入 `.env` 并让 compose 透传（compose 已包含这两个变量）：
+
+   ```ini
+   CAMPUX_TURNSTILE_SITE_KEY="你的-site-key"
+   CAMPUX_TURNSTILE_SECRET_KEY="你的-secret-key"
+   ```
+
+3. `docker compose up -d --no-deps campux` 重启后生效：注册表单会出现（通常无感的）人机验证，
+   服务端会向 Cloudflare 校验 token。**两个 key 都配置才生效**，未配置时自动降级为仅限流。
+
+无论是否启用人机验证，注册接口都有限流：同一来源每小时最多 5 次提交（返回 429）。
+来源 IP 优先取 Cloudflare 的 `cf-connecting-ip`。
+
+**账号治理（运维面板 → 全局用户）**
+
+- **停用 / 恢复账号**：停用后立即踢下线、禁止登录（对方会看到停用原因），QQ 机器人侧也会忽略其消息；
+  数据保留、随时恢复。系统运维账号与自己不能被停用。
+- **删除账号**：先看到该账号的关联情况（稿件、竞选、墙内身份、开墙申请、表白记录），再选择：
+  - 稿件与竞选：一起删除（含图片）／保留并转交「已注销账号」；
+  - 他运营的校园墙：保留并移交给你／连同校园墙一起彻底删除；
+  - 输入该账号的邮箱或昵称确认后执行。
+
+> 删除不可恢复；平台审计日志会保留 `system.user.delete` 记录（含删除的校园墙与稿件数量）。
+
 ---
 
 ## 5. 日常运维

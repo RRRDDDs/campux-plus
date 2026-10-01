@@ -4,7 +4,9 @@ import { hashPassword, Prisma, verifyPassword } from "@campux/db";
 import { randomInt } from "node:crypto";
 import { z } from "zod";
 import { clearSessionCookie, createSession, findActiveBan, getCookie, getSessionContext, hashToken, requireSession, sessionCookieName, setSessionCookie } from "../lib/auth";
-import { generateEmailCode, hashEmailCode, normalizeEmail, sendVerificationEmail } from "../lib/email";
+import { normalizeEmail } from "../lib/email";
+import { checkRateLimit, clientIpFromRequest } from "../lib/rate-limit";
+import { verifyTurnstileToken } from "../lib/turnstile";
 import { prisma } from "../lib/prisma";
 import { toMembership, toPublicUser, toTenantSummary } from "../lib/serializers";
 import { resolveEffectiveTenantMembership } from "../lib/tenant-access";
@@ -24,27 +26,28 @@ const updateMeSettingsSchema = z.object({
   autoFollowOwnPosts: z.boolean().optional(),
 });
 
-const requestRegisterCodeSchema = z.object({
-  email: emailSchema,
-});
+/** 申请开墙的注册限流：同一来源每小时最多 5 次提交。 */
+const REGISTER_RATE_LIMIT = 5;
+const REGISTER_RATE_WINDOW_MS = 60 * 60 * 1_000;
 
 const registerSchema = z.object({
   email: emailSchema,
-  code: z.string().trim().regex(/^\d{6}$/, "验证码格式不正确"),
   displayName: z.string().trim().min(1, "账户名称不能为空").max(80, "账户名称最多 80 个字符"),
   password: z.string().min(6).max(128),
   // 开墙申请信息：注册即提交申请，需系统运维审核通过后才能创建校园墙。
   wallName: z.string().trim().min(2, "想开的墙名至少 2 个字符").max(40, "墙名最多 40 个字符"),
   school: z.string().trim().max(60).optional(),
-  contact: z.string().trim().max(80).optional(),
+  contact: z.string().trim().min(2, "请填写联系方式（QQ / 微信 / 手机号）").max(80),
   reason: z.string().trim().max(300).optional(),
+  /** Cloudflare Turnstile 人机验证 token（未配置 Turnstile 时可不传）。 */
+  turnstileToken: z.string().trim().max(4096).optional(),
 });
 
 /** 重新提交申请时用的字段（与注册时的墙名/学校/联系方式一致）。 */
 const registerApplicationSchema = z.object({
   wallName: z.string().trim().min(2, "想开的墙名至少 2 个字符").max(40, "墙名最多 40 个字符"),
   school: z.string().trim().max(60).optional(),
-  contact: z.string().trim().max(80).optional(),
+  contact: z.string().trim().min(2, "请填写联系方式（QQ / 微信 / 手机号）").max(80),
   reason: z.string().trim().max(300).optional(),
 });
 
@@ -76,6 +79,8 @@ export function registerAuthRoutes(app: FastifyInstance, config: CampuxConfig) {
       managementHost: Boolean(managementHost),
       currentTenant: hostTenant ? toTenantSummary(hostTenant) : null,
       deployMode,
+      // 「申请开墙」表单的人机验证 site key（未配置 Turnstile 时为空字符串，前端不渲染）。
+      turnstileSiteKey: config.turnstile.enabled ? config.turnstile.siteKey : "",
     };
   });
 
@@ -133,6 +138,15 @@ export function registerAuthRoutes(app: FastifyInstance, config: CampuxConfig) {
     if (user.isTestAccount && config.nodeEnv !== "development") {
       return reply.code(403).send({
         message: "测试账号只能在开发环境登录",
+      });
+    }
+
+    // 平台级停用：数据保留但禁止登录（系统运维可在运维面板恢复）。
+    if (user.disabledAt) {
+      return reply.code(403).send({
+        message: user.disabledReason
+          ? `该账号已被停用：${user.disabledReason}`
+          : "该账号已被系统运维停用，如有疑问请联系系统运维。",
       });
     }
 
@@ -224,46 +238,21 @@ export function registerAuthRoutes(app: FastifyInstance, config: CampuxConfig) {
     };
   });
 
-  app.post("/api/auth/register/request-code", async (request, reply) => {
-    const managementHost = await findManagementHostByRequest(request);
-    if (!managementHost) {
-      return reply.code(404).send({ message: "当前入口不开放注册" });
-    }
-
-    const body = requestRegisterCodeSchema.parse(request.body);
-    const email = normalizeEmail(body.email);
-    const existing = await prisma.user.findUnique({
-      where: { email },
-      select: { id: true },
-    });
-    if (existing) {
-      return reply.code(409).send({ message: "这个邮箱已经注册，请直接登录" });
-    }
-
-    const code = generateEmailCode();
-    await prisma.emailVerificationCode.create({
-      data: {
-        email,
-        codeHash: hashEmailCode(email, code),
-        purpose: "operations_admin_register",
-        expiresAt: new Date(Date.now() + 10 * 60 * 1_000),
-      },
-    });
-    const sent = await sendVerificationEmail(config, { to: email, code });
-
-    return {
-      ok: true,
-      ...(sent.skipped ? { devCode: code } : {}),
-    };
-  });
-
   app.post("/api/auth/register", async (request, reply) => {
     const managementHost = await findManagementHostByRequest(request);
     if (!managementHost) {
       return reply.code(404).send({ message: "当前入口不开放注册" });
     }
 
-    const body = registerSchema.parse(request.body);
+    // 用 safeParse 而不是 parse：字段不合法时返回 400 + 友好文案，
+    // 否则 Fastify 会把 ZodError 当成 500（前端只会看到"请求失败：500"）。
+    const parsedBody = registerSchema.safeParse(request.body);
+    if (!parsedBody.success) {
+      return reply.code(400).send({
+        message: parsedBody.error.issues[0]?.message ?? "注册信息不完整，请检查后重试",
+      });
+    }
+    const body = parsedBody.data;
     const email = normalizeEmail(body.email);
     const existing = await prisma.user.findUnique({
       where: { email },
@@ -273,42 +262,37 @@ export function registerAuthRoutes(app: FastifyInstance, config: CampuxConfig) {
       return reply.code(409).send({ message: "这个邮箱已经注册，请直接登录" });
     }
 
-    const record = await prisma.emailVerificationCode.findFirst({
-      where: {
-        email,
-        purpose: "operations_admin_register",
-        consumedAt: null,
-        expiresAt: {
-          gt: new Date(),
-        },
-      },
-      orderBy: {
-        createdAt: "desc",
-      },
-    });
-    if (!record) {
-      return reply.code(400).send({ message: "验证码不存在或已过期" });
-    }
-    if (record.attempts >= 5) {
-      return reply.code(429).send({ message: "验证码尝试次数过多，请重新获取" });
-    }
-    if (record.codeHash !== hashEmailCode(email, body.code)) {
-      await prisma.emailVerificationCode.update({
-        where: { id: record.id },
-        data: { attempts: { increment: 1 } },
+    // 防脚本刷注册：同一来源每小时最多尝试若干次（独立于人机验证的第二道防线）。
+    const clientIp = clientIpFromRequest(request);
+    const rateLimit = checkRateLimit(`register:${clientIp}`, REGISTER_RATE_LIMIT, REGISTER_RATE_WINDOW_MS);
+    if (!rateLimit.allowed) {
+      return reply.code(429).send({
+        message: `提交太频繁，请 ${Math.ceil(rateLimit.retryAfterSeconds / 60)} 分钟后再试。`,
       });
-      return reply.code(400).send({ message: "验证码不正确" });
+    }
+
+    // 人机验证（配置了 Cloudflare Turnstile 时生效）。
+    if (config.turnstile.enabled) {
+      const token = body.turnstileToken?.trim();
+      if (!token) {
+        return reply.code(400).send({ message: "请先完成人机验证" });
+      }
+      const verified = await verifyTurnstileToken({
+        secretKey: config.turnstile.secretKey,
+        token,
+        remoteIp: clientIp === "unknown" ? undefined : clientIp,
+      });
+      if (!verified.ok && !verified.infrastructureFailure) {
+        request.log.warn({ errorCodes: verified.errorCodes, email }, "turnstile verification failed");
+        return reply.code(400).send({ message: "人机验证未通过，请刷新页面后重试" });
+      }
+      if (verified.infrastructureFailure) {
+        // 不因为 CF 抖动挡住正常用户，但要留下日志。
+        request.log.warn({ email }, "turnstile verification unavailable, allowing registration");
+      }
     }
 
     const user = await prisma.$transaction(async (tx) => {
-      await tx.emailVerificationCode.update({
-        where: { id: record.id },
-        data: {
-          consumedAt: new Date(),
-          attempts: { increment: 1 },
-        },
-      });
-
       return tx.user.create({
         data: {
           qqUin: await generateSyntheticQqUin(tx),
@@ -335,6 +319,10 @@ export function registerAuthRoutes(app: FastifyInstance, config: CampuxConfig) {
     const token = await createSession(user.id, null);
     setSessionCookie(reply, token);
 
+    // 注册即提交申请：这里把申请状态一起返回，前端不需要额外请求就能进入「等待审核」。
+    const application = await getLatestTenantApplication(user.id);
+    const creationPermission = await resolveTenantCreationPermission(user);
+
     return {
       authenticated: true,
       user: toPublicUser(user),
@@ -345,6 +333,9 @@ export function registerAuthRoutes(app: FastifyInstance, config: CampuxConfig) {
       activeBan: null,
       needsTenantSelection: false,
       hostLocked: false,
+      tenantApplication: application ? toTenantApplicationSummary(application) : null,
+      canCreateTenant: creationPermission.allowed,
+      createTenantBlockedReason: creationPermission.allowed ? null : creationPermission.message,
     };
   });
 
@@ -466,7 +457,13 @@ export function registerAuthRoutes(app: FastifyInstance, config: CampuxConfig) {
     if (!context) {
       return reply.code(401).send({ message: "请先登录" });
     }
-    const body = registerApplicationSchema.parse(request.body ?? {});
+    const parsedApplication = registerApplicationSchema.safeParse(request.body ?? {});
+    if (!parsedApplication.success) {
+      return reply.code(400).send({
+        message: parsedApplication.error.issues[0]?.message ?? "申请信息不完整，请检查后重试",
+      });
+    }
+    const body = parsedApplication.data;
     const result = await submitTenantApplication({
       userId: context.user.id,
       wallName: body.wallName,
