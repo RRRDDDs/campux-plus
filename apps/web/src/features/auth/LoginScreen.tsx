@@ -6,6 +6,7 @@ import type { MeResponse } from "@/types/app";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ThemeModeButton } from "@/features/theme/ThemeModeControl";
 import { AggregateLoginButtons } from "@/features/aggregate-oauth/LoginButtons";
@@ -141,9 +142,11 @@ export function LoginScreen({
           <div className="product-surface px-4 py-5">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <p className="text-lg font-semibold text-slate-950">注册运营管理员账号</p>
+                <p className="text-lg font-semibold text-slate-950">申请开通运营账号</p>
                 <p className="mt-2 text-sm leading-6 text-slate-600">
-                  这个入口只面向要创建并运营校园墙的运营者，注册后可自助开墙。普通用户请通过对应校园墙机器人注册。
+                  这个入口面向想要创建并运营校园墙的同学：填好资料提交申请后，需要由系统运维审核，
+                  <span className="font-semibold text-slate-700">审核通过后才能创建自己的校园墙</span>。
+                  普通用户请通过对应校园墙机器人注册。
                 </p>
               </div>
               <button type="button" className="shrink-0 text-sm font-semibold text-blue-700" onClick={() => setView("login")}>
@@ -212,13 +215,13 @@ export function LoginScreen({
               <div className="mt-3 product-surface px-4 py-4">
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <p className="text-sm font-bold text-slate-950">墙号运营者第一次使用？</p>
+                    <p className="text-sm font-bold text-slate-950">想自己开一面校园墙？</p>
                     <p className="mt-1 text-xs font-semibold leading-5 text-slate-500">
-                      注册运营管理员账号即可自助创建校园墙。普通用户请通过对应校园墙机器人注册，已有账号可直接登录。
+                      提交开墙申请，由系统运维审核通过后即可创建。普通用户请通过对应校园墙机器人注册，已有账号可直接登录。
                     </p>
                   </div>
                   <button type="button" className="shrink-0 text-sm font-semibold text-blue-700" onClick={() => setView("register")}>
-                    注册
+                    申请开墙
                   </button>
                 </div>
               </div>
@@ -235,6 +238,10 @@ function RegisterPanel({ onRegistered }: { onRegistered: (data: MeResponse) => v
   const [displayName, setDisplayName] = useState("");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
+  const [wallName, setWallName] = useState("");
+  const [school, setSchool] = useState("");
+  const [contact, setContact] = useState("");
+  const [reason, setReason] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [sendingCode, setSendingCode] = useState(false);
@@ -262,7 +269,16 @@ function RegisterPanel({ onRegistered }: { onRegistered: (data: MeResponse) => v
     try {
       const data = await api<MeResponse>("/api/auth/register", {
         method: "POST",
-        body: JSON.stringify({ email, displayName, password, code }),
+        body: JSON.stringify({
+          email,
+          displayName,
+          password,
+          code,
+          wallName,
+          school,
+          contact,
+          reason,
+        }),
       });
       onRegistered(data);
     } catch (caught) {
@@ -283,9 +299,24 @@ function RegisterPanel({ onRegistered }: { onRegistered: (data: MeResponse) => v
       </div>
       <Input value={displayName} placeholder="账户名称" onChange={(event) => setDisplayName(event.target.value)} />
       <Input value={password} type="password" placeholder="密码，至少 6 位" onChange={(event) => setPassword(event.target.value)} />
+      <div className="mt-1 rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
+        <p className="text-xs font-semibold text-slate-700">开墙申请（提交后由系统运维审核）</p>
+        <div className="mt-2 grid gap-2">
+          <Input value={wallName} placeholder="想开的校园墙名称（必填，如：XX中学万能墙）" onChange={(event) => setWallName(event.target.value)} />
+          <Input value={school} placeholder="学校 / 单位（选填）" onChange={(event) => setSchool(event.target.value)} />
+          <Input value={contact} placeholder="联系方式（选填，方便运维联系你）" onChange={(event) => setContact(event.target.value)} />
+          <Textarea
+            className="min-h-20 text-sm"
+            value={reason}
+            maxLength={300}
+            placeholder="简单说明一下用途，例如面向哪个学校、预计多少同学使用（选填）"
+            onChange={(event) => setReason(event.target.value)}
+          />
+        </div>
+      </div>
       {message ? <p className="text-sm font-medium text-slate-600">{message}</p> : null}
-      <Button className="font-medium" disabled={busy || email.trim().length === 0 || code.trim().length !== 6 || displayName.trim().length === 0 || password.length < 6} type="submit">
-        {busy ? "注册中" : "注册并进入运营管理"}
+      <Button className="font-medium" disabled={busy || email.trim().length === 0 || code.trim().length !== 6 || displayName.trim().length === 0 || password.length < 6 || wallName.trim().length < 2} type="submit">
+        {busy ? "提交中" : "提交申请"}
       </Button>
     </form>
   );

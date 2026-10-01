@@ -119,6 +119,8 @@ model User {
   oauthIdentities OAuthIdentity[]
   confessionsSent Confession[] @relation("ConfessionFrom")
   confessionsReceived Confession[] @relation("ConfessionTo")
+  tenantApplications TenantApplication[] @relation("TenantApplicant")
+  reviewedTenantApplications TenantApplication[] @relation("TenantApplicationReviewer")
 }
 
 // 第三方聚合登录绑定：把第三方平台的社交 UID 关联到本地账号。
@@ -688,4 +690,25 @@ model Confession {
   @@unique([tenantId, fromUserId, toUserId, status])
   @@index([tenantId, toUserId, status])
   @@index([tenantId, createdAt])
+}
+
+// 开墙申请：运营者在注册时提交，需系统运维审核通过后才能创建自己的校园墙。
+model TenantApplication {
+  id           String    @id @default(uuid())
+  userId       String
+  wallName     String
+  school       String?
+  contact      String?
+  reason       String?
+  status       String    @default("pending") // pending | approved | rejected
+  reviewNote   String?
+  reviewedById String?
+  reviewedAt   DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  user         User      @relation("TenantApplicant", fields: [userId], references: [id], onDelete: Cascade)
+  reviewedBy   User?     @relation("TenantApplicationReviewer", fields: [reviewedById], references: [id])
+
+  @@index([status, createdAt])
+  @@index([userId, createdAt])
 }

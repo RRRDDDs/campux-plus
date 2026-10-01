@@ -126,7 +126,27 @@ export type MeResponse =
       activeBan: ActiveBan | null;
       needsTenantSelection: boolean;
       hostLocked: boolean;
+      /** 开墙申请（注册时提交，需系统运维审核通过后才能开墙） */
+      tenantApplication?: TenantApplication | null;
+      /** 是否被允许创建校园墙（系统运维恒为 true；其他运营者需申请已通过且尚无墙） */
+      canCreateTenant?: boolean;
+      /** 不允许开墙时的原因文案 */
+      createTenantBlockedReason?: string | null;
     };
+
+export type TenantApplicationStatus = "pending" | "approved" | "rejected";
+
+export type TenantApplication = {
+  id: string;
+  wallName: string;
+  school: string | null;
+  contact: string | null;
+  reason: string | null;
+  status: TenantApplicationStatus;
+  reviewNote: string | null;
+  reviewedAt: string | null;
+  createdAt: string;
+};
 
 export type AuthenticatedMe = Extract<MeResponse, { authenticated: true }>;
 export type TenantMetadata = {

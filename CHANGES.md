@@ -63,10 +63,39 @@
 
 ## 三、仓库层面的调整
 
+## 三、开墙申请审核 + 系统运维删墙
+
+新增文件：
+
+- `packages/db/prisma/migrations/20261001030000_add_tenant_applications/migration.sql` —— 新增 `TenantApplication` 表。
+- `apps/server/src/lib/tenant-application.ts` —— 申请提交/重新提交、审核、开墙资格判定（系统运维不限；其他人需申请通过且尚无墙）。
+- `apps/server/src/lib/tenant-application.test.ts` —— 状态归一化与摘要转换的单元测试。
+- `apps/server/src/lib/tenant-export.ts` —— 删除前导出该校园墙的完整数据（BigInt/日期已做 JSON 安全转换）。
+- `apps/web/src/features/onboarding/TenantApplicationStatusScreen.tsx` —— 申请审核中 / 被拒绝（可重新提交）页面。
+
+修改文件：
+
+- `packages/db/prisma/schema.prisma` —— 新增 `TenantApplication` 模型与用户关系。
+- `apps/server/src/routes/auth.ts` —— 注册即提交开墙申请；`GET /api/me` 返回申请状态与开墙资格；新增 `POST /api/me/tenant-application`（重新提交）。
+- `apps/server/src/routes/system.ts` —— 创建校园墙前强制校验开墙资格；新增开墙申请列表/审核接口；新增导出与彻底删除接口。
+- `apps/web/src/App.tsx` —— 待审核/被拒时进入申请状态页；单墙模式下为系统运维保留运维入口。
+- `apps/web/src/features/auth/LoginScreen.tsx` —— 注册表单改为「申请开墙」并收集墙名/学校/联系方式/用途。
+- `apps/web/src/features/ops/OpsPanel.tsx`、`overview-tenant-navigation.ts` —— 新增「开墙申请」页签与「彻底删除校园墙」危险区。
+- `apps/web/src/types/app.ts` —— 对应类型。
+
+行为要点：
+
+- 申请未通过时，创建校园墙接口返回 403（后端强制，不依赖前端隐藏按钮）。
+- 只有 `system_operator` 能查看/审核申请、导出与删除校园墙；运营管理员访问一律 403。
+- 每个账号默认只能开 1 个校园墙（判定方式：当前没有任何以 admin 身份参与的墙）；历史账号不受影响，但同样无法再开第二个。
+- 删除校园墙要求「先下载备份 → 勾选确认 → 输入墙名完全一致」，删除数据库数据与对象存储附件，并在审计日志写入 `tenant.delete`（保留墙名、标识与附件数量）。
+
+## 四、仓库层面的调整
+
 - 重写 `README.md` 为二次开发版本，`DEPLOY.md` 为新写的部署教程，新增 `NOTICE`（Apache-2.0 要求的修改声明）与本文件。
 - 移除 `.github/workflows`、`.github/actions`（上游面向官方镜像/发布流程，放到个人仓库只会产生失败任务）。
 
-## 四、上游本体改动说明
+## 五、上游本体改动说明
 
 上游在同一时期仍在持续更新（本仓库基线之后上游又有新提交）。若你希望跟进上游，
 可以参考 `NOTICE` 里列出的文件清单，把本仓库的改动以补丁形式合并到最新上游代码上。

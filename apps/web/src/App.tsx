@@ -22,6 +22,7 @@ import { OpsStandaloneScreen } from "@/features/ops/OpsStandaloneScreen";
 import { OnboardingWizard } from "@/features/onboarding/OnboardingWizard";
 import { SetupWizard } from "@/features/onboarding/SetupWizard";
 import { WallStatusScreen } from "@/features/onboarding/WallStatusScreen";
+import { TenantApplicationStatusScreen } from "@/features/onboarding/TenantApplicationStatusScreen";
 import { AppShell } from "@/features/shell/AppShell";
 import { CampaignsPage } from "@/features/services/CampaignsPage";
 import { CampaignDetailPage } from "@/features/services/CampaignDetailPage";
@@ -131,7 +132,9 @@ export function App() {
   // In single-wall deployments tenant mechanics are hidden: no ops-panel entry,
   // no wall switcher. The operator just uses their one wall like a normal admin.
   const singleMode = authContext.deployMode === "single";
-  const showOpsUi = !singleMode;
+  // 单墙部署默认隐藏多租户入口，但系统运维/运营管理员仍需要有运维入口
+  // （开墙申请审核、校园墙生命周期管理都在运维面板里）。
+  const showOpsUi = !singleMode || (me?.authenticated === true && canOpenOps(me));
   const selectedTenant = me?.authenticated ? me.currentTenant : (hostTenant ?? tenants[0]);
   const currentRole = me?.authenticated ? me.currentMembership?.role : undefined;
   const defaultPostsTab: PostsTab = currentRole && canAccess(currentRole, "reviewer") ? "review" : "mine";
@@ -680,6 +683,11 @@ export function App() {
     }
 
     return <TenantSelectionScreen me={me} onSelectTenant={selectTenant} onLogout={logout} />;
+  }
+
+  // 开墙申请待审核 / 被拒绝：显示申请状态页，而不是直接进入开墙引导。
+  if (me.canCreateTenant === false && me.memberships.length === 0) {
+    return <TenantApplicationStatusScreen me={me} onRefresh={refreshMe} onLogout={logout} />;
   }
 
   if (canOpenOps(me) && (route.kind === "ops" || me.memberships.length === 0)) {

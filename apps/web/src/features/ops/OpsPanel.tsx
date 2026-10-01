@@ -66,7 +66,29 @@ const lifecycleActions: Array<{ status: TenantStatus; label: string; icon: typeo
   { status: "archived", label: "归档租户", icon: ArchiveIcon },
 ];
 
-type OpsSection = "overview" | "tenants" | "users" | "audit" | "platform";
+type OpsSection = "overview" | "applications" | "tenants" | "users" | "audit" | "platform";
+
+/** 开墙申请（只有系统运维能看到与处理）。 */
+type OpsTenantApplication = {
+  id: string;
+  wallName: string;
+  school: string | null;
+  contact: string | null;
+  reason: string | null;
+  status: "pending" | "approved" | "rejected";
+  reviewNote: string | null;
+  reviewedAt: string | null;
+  createdAt: string;
+  applicant: {
+    id: string;
+    displayName: string | null;
+    email: string | null;
+    qqUin: string;
+    registeredAt: string;
+  };
+  reviewedByName: string | null;
+  tenants: Array<{ id: string; name: string; slug: string; status: string }>;
+};
 type OpsPanelMode = "system" | "operations";
 type SystemUserRoleFilter = TenantRole | SystemRole;
 type OpsUserListPreferences = {
@@ -190,6 +212,17 @@ export function OpsPanel({
   const [auditPagination, setAuditPagination] = useState<Pagination>(() => defaultPagination());
   const [auditPage, setAuditPage] = useState(1);
   const [activeSection, setActiveSection] = useState<OpsSection>("overview");
+  const [applications, setApplications] = useState<OpsTenantApplication[]>([]);
+  const [applicationFilter, setApplicationFilter] = useState<"pending" | "approved" | "rejected" | "all">("pending");
+  const [applicationPendingCount, setApplicationPendingCount] = useState(0);
+  const [applicationsPagination, setApplicationsPagination] = useState<Pagination>(() => defaultPagination());
+  const [applicationsPage, setApplicationsPage] = useState(1);
+  const [loadingApplications, setLoadingApplications] = useState(false);
+  const [reviewingApplicationId, setReviewingApplicationId] = useState("");
+  const [tenantDeleteOpen, setTenantDeleteOpen] = useState(false);
+  const [tenantDeleteConfirmName, setTenantDeleteConfirmName] = useState("");
+  const [tenantDeleteAck, setTenantDeleteAck] = useState(false);
+  const [deletingTenant, setDeletingTenant] = useState(false);
   const [loadingOverview, setLoadingOverview] = useState(false);
   const [loadingSettings, setLoadingSettings] = useState(false);
   const [loadingUsers, setLoadingUsers] = useState(false);
@@ -404,9 +437,94 @@ export function OpsPanel({
     await Promise.all([refreshOverview(), refreshSettings(), refreshUsers(userPage), refreshOperationsAdmins(), refreshAudit(auditPage)]);
   }
 
+  async function refreshApplications(page = applicationsPage, filter = applicationFilter) {
+    if (!isSystemMode) {
+      return;
+    }
+    setLoadingApplications(true);
+    try {
+      const data = await api<{
+        items: OpsTenantApplication[];
+        pendingCount: number;
+        pagination: Pagination;
+      }>(`/api/system/tenant-applications?status=${filter}&page=${page}&limit=20`);
+      setApplications(data.items);
+      setApplicationPendingCount(data.pendingCount);
+      setApplicationsPagination(data.pagination);
+      setApplicationsPage(data.pagination.page);
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "读取开墙申请失败");
+    } finally {
+      setLoadingApplications(false);
+    }
+  }
+
+  async function reviewApplication(application: OpsTenantApplication, action: "approve" | "reject") {
+    let note = "";
+    if (action === "reject") {
+      const input = window.prompt(`拒绝「${application.wallName}」的申请，可以填写理由（会展示给申请人）：`, "");
+      if (input === null) {
+        return;
+      }
+      note = input.trim();
+    } else if (!window.confirm(`确认通过「${application.wallName}」的开墙申请？\n通过后该账号即可创建自己的校园墙。`)) {
+      return;
+    }
+    setReviewingApplicationId(application.id);
+    try {
+      await api(`/api/system/tenant-applications/${application.id}/review`, {
+        method: "POST",
+        body: JSON.stringify({ action, note: note || undefined }),
+      });
+      toast.success(action === "approve" ? "已通过，申请人现在可以创建校园墙了。" : "已拒绝该申请。");
+      await refreshApplications(applicationsPage);
+      await refreshAudit(1);
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "操作失败");
+    } finally {
+      setReviewingApplicationId("");
+    }
+  }
+
+  async function deleteSelectedTenant() {
+    if (!selectedTenant || deletingTenant) {
+      return;
+    }
+    if (tenantDeleteConfirmName.trim() !== selectedTenant.name) {
+      toast.error("请输入与校园墙完全一致的名称");
+      return;
+    }
+    if (!tenantDeleteAck) {
+      toast.error("请先导出备份并勾选确认");
+      return;
+    }
+    setDeletingTenant(true);
+    try {
+      await api(`/api/system/tenants/${selectedTenant.id}`, {
+        method: "DELETE",
+        body: JSON.stringify({ confirmName: tenantDeleteConfirmName.trim(), backupAcknowledged: true }),
+      });
+      toast.success(`已彻底删除校园墙「${selectedTenant.name}」。`);
+      setTenantDeleteOpen(false);
+      setTenantDeleteConfirmName("");
+      setTenantDeleteAck(false);
+      tenantRequestGate.current.invalidate();
+      await refreshOverview();
+      await refreshAudit(1);
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "删除失败");
+    } finally {
+      setDeletingTenant(false);
+    }
+  }
+
   async function refreshCurrentSection() {
     if (activeSection === "overview") {
       await refreshOverview();
+      return;
+    }
+    if (activeSection === "applications") {
+      await refreshApplications(applicationsPage);
       return;
     }
     if (activeSection === "tenants") {
@@ -429,6 +547,19 @@ export function OpsPanel({
       toast.error(caught instanceof Error ? caught.message : "无法读取运维面板数据");
     });
   }, []);
+
+  // 系统运维进入「开墙申请」页签时读取申请列表（待审核数量会显示在导航上）。
+  useEffect(() => {
+    if (!isSystemMode) {
+      return;
+    }
+    if (activeSection !== "applications") {
+      // 其它页签也顺手刷新一次待审核数量，便于在导航上看到红点计数。
+      void refreshApplications(1, applicationFilter);
+      return;
+    }
+    void refreshApplications(applicationsPage, applicationFilter);
+  }, [activeSection, applicationFilter, isSystemMode]);
 
   useEffect(() => {
     if (activeSection !== "overview" && activeSection !== "tenants") return;
@@ -853,6 +984,14 @@ ${impact}`)) {
     icon: typeof ActivityIcon;
   }> = [
     { value: "overview", label: "运行总览", description: "状态、队列与交付进度", icon: LayoutDashboardIcon },
+    ...(isSystemMode
+      ? [{
+          value: "applications" as OpsSection,
+          label: applicationPendingCount > 0 ? `开墙申请 (${applicationPendingCount})` : "开墙申请",
+          description: "审核自助开墙申请",
+          icon: ClipboardListIcon,
+        }]
+      : []),
     { value: "tenants", label: isSystemMode ? "校园墙" : "我的校园墙", description: "租户配置与生命周期", icon: Building2Icon },
     { value: "users", label: isSystemMode ? "全局用户" : "墙内用户", description: "账号、身份与权限", icon: UsersRoundIcon },
     { value: "audit", label: "审计日志", description: "平台操作记录", icon: ClipboardListIcon },
@@ -1007,6 +1146,117 @@ ${impact}`)) {
             </div>
           ) : null}
 
+          {activeSection === "applications" ? (
+            <div className="grid gap-4">
+              <Card className="rounded-lg">
+                <CardContent className="p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <p className="font-bold text-slate-950">开墙申请</p>
+                      <p className="mt-0.5 text-xs text-slate-500">
+                        运营者在登录页提交的开墙申请。通过后该账号即可创建自己的校园墙（每个账号 1 个）。
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Select
+                        value={applicationFilter}
+                        onValueChange={(value) => {
+                          setApplicationFilter(value as "pending" | "approved" | "rejected" | "all");
+                          setApplicationsPage(1);
+                        }}
+                      >
+                        <SelectTrigger className="h-9 w-[128px]">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="pending">待审核</SelectItem>
+                          <SelectItem value="approved">已通过</SelectItem>
+                          <SelectItem value="rejected">已拒绝</SelectItem>
+                          <SelectItem value="all">全部</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <Button variant="outline" size="sm" disabled={loadingApplications} onClick={() => void refreshApplications(applicationsPage)}>
+                        刷新
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 grid gap-3">
+                    {loadingApplications && applications.length === 0 ? (
+                      <InlineLoading title="正在读取开墙申请" />
+                    ) : applications.length === 0 ? (
+                      <p className="rounded-md bg-slate-50 px-3 py-10 text-center text-sm font-semibold text-slate-500">
+                        {applicationFilter === "pending" ? "当前没有待审核的开墙申请。" : "没有符合条件的申请。"}
+                      </p>
+                    ) : (
+                      applications.map((application) => (
+                        <div key={application.id} className="rounded-md border border-slate-200 p-4">
+                          <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="flex flex-wrap items-center gap-2 text-sm font-semibold text-slate-950">
+                                {application.wallName}
+                                <Badge variant={application.status === "pending" ? "secondary" : "outline"}>
+                                  {application.status === "pending" ? "待审核" : application.status === "approved" ? "已通过" : "已拒绝"}
+                                </Badge>
+                              </p>
+                              <p className="mt-1 text-xs text-slate-500">
+                                申请人：{application.applicant.displayName ?? "未命名"}
+                                {application.applicant.email ? ` · ${application.applicant.email}` : ""}
+                                {` · QQ ${application.applicant.qqUin}`}
+                                {` · 提交于 ${formatOpsTime(application.createdAt)}`}
+                              </p>
+                            </div>
+                            {application.status === "pending" ? (
+                              <div className="flex shrink-0 items-center gap-2">
+                                <Button
+                                  size="sm"
+                                  disabled={reviewingApplicationId === application.id}
+                                  onClick={() => void reviewApplication(application, "approve")}
+                                >
+                                  通过
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  disabled={reviewingApplicationId === application.id}
+                                  onClick={() => void reviewApplication(application, "reject")}
+                                >
+                                  拒绝
+                                </Button>
+                              </div>
+                            ) : null}
+                          </div>
+
+                          <div className="mt-3 grid gap-1 text-xs leading-5 text-slate-600">
+                            {application.school ? <p>学校 / 单位：{application.school}</p> : null}
+                            {application.contact ? <p>联系方式：{application.contact}</p> : null}
+                            {application.reason ? <p className="whitespace-pre-wrap">用途说明：{application.reason}</p> : null}
+                            {application.status !== "pending" ? (
+                              <p className="text-slate-500">
+                                处理结果：{application.status === "approved" ? "已通过" : "已拒绝"}
+                                {application.reviewedByName ? ` · 处理人 ${application.reviewedByName}` : ""}
+                                {application.reviewNote ? ` · 备注：${application.reviewNote}` : ""}
+                              </p>
+                            ) : null}
+                            {application.tenants.length > 0 ? (
+                              <p className="text-slate-500">该账号已在运营：{application.tenants.map((tenant) => tenant.name).join("、")}</p>
+                            ) : null}
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+
+                  <PaginationControls
+                    pagination={applicationsPagination}
+                    busy={loadingApplications}
+                    onPageChange={(page) => void refreshApplications(page)}
+                  />
+                </CardContent>
+              </Card>
+            </div>
+          ) : null}
+
           {activeSection === "tenants" ? (
             <div className="grid min-w-0 gap-4 xl:grid-cols-[320px_minmax(0,1fr)]">
               <Card className="min-w-0 rounded-lg xl:sticky xl:top-0 xl:self-start">
@@ -1156,6 +1406,32 @@ ${impact}`)) {
                           {selectedTenant.bots.length > 0 ? selectedTenant.bots.map((bot) => <TenantBotCard key={bot.id} bot={bot} />) : <p className="rounded-md bg-slate-50 px-3 py-6 text-center text-sm font-bold text-slate-500 xl:col-span-2">当前校园墙还没有配置机器人。</p>}
                         </div>
                       </section>
+
+                      {isSystemMode ? (
+                        <section className="rounded-md border border-rose-200 bg-rose-50 p-4 2xl:col-span-2">
+                          <div className="flex items-center gap-2 font-bold text-rose-700">
+                            <Trash2Icon className="size-4" />
+                            彻底删除校园墙
+                          </div>
+                          <p className="mt-2 text-sm leading-6 text-rose-700">
+                            删除后该墙的稿件、成员关系、机器人配置、表白记录与图片都会被清除，且无法恢复
+                            （平台审计日志会保留一条删除记录）。建议先导出备份。
+                          </p>
+                          <Button
+                            className="mt-3"
+                            size="sm"
+                            variant="destructive"
+                            onClick={() => {
+                              setTenantDeleteConfirmName("");
+                              setTenantDeleteAck(false);
+                              setTenantDeleteOpen(true);
+                            }}
+                          >
+                            <Trash2Icon data-icon="inline-start" />
+                            删除「{selectedTenant.name}」
+                          </Button>
+                        </section>
+                      ) : null}
                     </div>
                     <p className="border-t border-slate-100 px-4 py-3 text-xs leading-5 text-slate-500">校园墙名称、访问标识、主题色、品牌名和公告由租户管理员维护；生命周期和专属域名由这里统一管理。</p>
                   </CardContent>
@@ -1296,6 +1572,68 @@ ${impact}`)) {
             <Button disabled={creatingTenant || enteringTenantId.length > 0 || tenantForm.name.trim().length === 0 || tenantFormSlug.length === 0 || tenantFormInvalid} onClick={() => void createTenant()}>
               <PlusIcon data-icon="inline-start" />
               {creatingTenant ? "创建中..." : "创建并继续接入"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={tenantDeleteOpen} onOpenChange={(open) => !deletingTenant && setTenantDeleteOpen(open)}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>彻底删除校园墙</DialogTitle>
+            <DialogDescription>
+              这个操作不可恢复。请先导出备份，再输入校园墙名称确认。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3">
+            <div className="rounded-md bg-slate-50 p-3 text-sm">
+              <p>
+                要删除的校园墙：<span className="font-semibold text-slate-900">{selectedTenant?.name}</span>
+              </p>
+              <p className="mt-1 text-xs text-slate-500">
+                包含 {selectedTenant?.postCount ?? 0} 篇稿件、{selectedTenant?.memberCount ?? 0} 位成员、
+                {selectedTenant?.botAccountCount ?? 0} 个墙号。
+              </p>
+            </div>
+            <a
+              className="text-sm font-semibold text-blue-700 underline"
+              href={`/api/system/tenants/${selectedTenant?.id ?? ""}/export`}
+            >
+              ① 下载该校园墙的数据备份（JSON）
+            </a>
+            <label className="flex items-start gap-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                className="mt-1 size-4"
+                checked={tenantDeleteAck}
+                onChange={(event) => setTenantDeleteAck(event.target.checked)}
+              />
+              <span>我已保存上面的备份，并理解删除后无法恢复</span>
+            </label>
+            <label className="grid gap-1 text-sm font-medium">
+              ② 输入校园墙名称确认
+              <Input
+                value={tenantDeleteConfirmName}
+                placeholder={selectedTenant?.name ?? ""}
+                onChange={(event) => setTenantDeleteConfirmName(event.target.value)}
+              />
+            </label>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" disabled={deletingTenant} onClick={() => setTenantDeleteOpen(false)}>
+              取消
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={
+                deletingTenant
+                || !tenantDeleteAck
+                || !selectedTenant
+                || tenantDeleteConfirmName.trim() !== selectedTenant.name
+              }
+              onClick={() => void deleteSelectedTenant()}
+            >
+              {deletingTenant ? "删除中…" : "确认彻底删除"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1894,6 +2232,16 @@ function MetricCard({ title, value, icon: Icon, accent }: { title: string; value
       <p className="mt-1 text-xl font-semibold tabular-nums">{value}</p>
     </div>
   );
+}
+
+/** 运维面板里的简短时间显示：8/31 14:05。 */
+function formatOpsTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  const pad = (input: number) => String(input).padStart(2, "0");
+  return `${date.getMonth() + 1}/${date.getDate()} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 function formatDateTime(value: string | null) {

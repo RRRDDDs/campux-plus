@@ -10,6 +10,7 @@ import { toMembership, toPublicUser, toTenantSummary } from "../lib/serializers"
 import { resolveEffectiveTenantMembership } from "../lib/tenant-access";
 import { findManagementHostByRequest, findTenantByRequestHost } from "../lib/tenant-host";
 import { getDeployMode, resolveSingleModeTenantId } from "../lib/deploy-mode";
+import { getLatestTenantApplication, resolveTenantCreationPermission, submitTenantApplication, toTenantApplicationSummary } from "../lib/tenant-application";
 
 const loginSchema = z.object({
   account: z.string().trim().min(1).optional(),
@@ -32,6 +33,19 @@ const registerSchema = z.object({
   code: z.string().trim().regex(/^\d{6}$/, "验证码格式不正确"),
   displayName: z.string().trim().min(1, "账户名称不能为空").max(80, "账户名称最多 80 个字符"),
   password: z.string().min(6).max(128),
+  // 开墙申请信息：注册即提交申请，需系统运维审核通过后才能创建校园墙。
+  wallName: z.string().trim().min(2, "想开的墙名至少 2 个字符").max(40, "墙名最多 40 个字符"),
+  school: z.string().trim().max(60).optional(),
+  contact: z.string().trim().max(80).optional(),
+  reason: z.string().trim().max(300).optional(),
+});
+
+/** 重新提交申请时用的字段（与注册时的墙名/学校/联系方式一致）。 */
+const registerApplicationSchema = z.object({
+  wallName: z.string().trim().min(2, "想开的墙名至少 2 个字符").max(40, "墙名最多 40 个字符"),
+  school: z.string().trim().max(60).optional(),
+  contact: z.string().trim().max(80).optional(),
+  reason: z.string().trim().max(300).optional(),
 });
 
 const selectTenantSchema = z.object({
@@ -304,6 +318,16 @@ export function registerAuthRoutes(app: FastifyInstance, config: CampuxConfig) {
           passwordChangeRequired: false,
           isTestAccount: false,
           systemRole: "operations_admin",
+          // 注册即提交开墙申请：默认 pending，系统运维审核通过后才能创建校园墙。
+          tenantApplications: {
+            create: {
+              wallName: body.wallName,
+              school: body.school || null,
+              contact: body.contact || null,
+              reason: body.reason || null,
+              status: "pending",
+            },
+          },
         },
       });
     });
@@ -414,6 +438,9 @@ export function registerAuthRoutes(app: FastifyInstance, config: CampuxConfig) {
     const systemAccessibleTenants = await listSystemAccessibleTenants(context.user.systemRole);
     const visibleMemberships = context.memberships.filter((membership) => membership.tenant.status !== "archived");
     const needsTenantSelection = !context.selectedTenant && (visibleMemberships.length > 1 || systemAccessibleTenants.length > 0);
+    // 开墙申请状态：没有墙的运营者据此看到「审核中 / 已拒绝」页面，而不是直接进开墙向导。
+    const application = await getLatestTenantApplication(context.user.id);
+    const creationPermission = await resolveTenantCreationPermission(context.user);
 
     return {
       authenticated: true,
@@ -427,7 +454,30 @@ export function registerAuthRoutes(app: FastifyInstance, config: CampuxConfig) {
       activeBan: toActiveBan(context.activeBan),
       needsTenantSelection,
       hostLocked: Boolean(context.hostTenant),
+      tenantApplication: application ? toTenantApplicationSummary(application) : null,
+      canCreateTenant: creationPermission.allowed,
+      createTenantBlockedReason: creationPermission.allowed ? null : creationPermission.message,
     };
+  });
+
+  // 被拒绝后重新提交开墙申请（通过后即可创建校园墙）。
+  app.post("/api/me/tenant-application", async (request, reply) => {
+    const context = await getSessionContext(request);
+    if (!context) {
+      return reply.code(401).send({ message: "请先登录" });
+    }
+    const body = registerApplicationSchema.parse(request.body ?? {});
+    const result = await submitTenantApplication({
+      userId: context.user.id,
+      wallName: body.wallName,
+      school: body.school ?? null,
+      contact: body.contact ?? null,
+      reason: body.reason ?? null,
+    });
+    if (!result.ok) {
+      return reply.code(409).send({ message: result.message, code: result.code });
+    }
+    return { ok: true, application: result.application };
   });
 
   app.patch("/api/me/settings", async (request, reply) => {

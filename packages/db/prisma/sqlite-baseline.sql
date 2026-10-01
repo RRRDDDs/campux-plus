@@ -514,6 +514,24 @@ CREATE TABLE "Confession" (
     CONSTRAINT "Confession_toUserId_fkey" FOREIGN KEY ("toUserId") REFERENCES "User" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
+-- CreateTable
+CREATE TABLE "TenantApplication" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "userId" TEXT NOT NULL,
+    "wallName" TEXT NOT NULL,
+    "school" TEXT,
+    "contact" TEXT,
+    "reason" TEXT,
+    "status" TEXT NOT NULL DEFAULT 'pending',
+    "reviewNote" TEXT,
+    "reviewedById" TEXT,
+    "reviewedAt" DATETIME,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "TenantApplication_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "TenantApplication_reviewedById_fkey" FOREIGN KEY ("reviewedById") REFERENCES "User" ("id") ON DELETE SET NULL ON UPDATE CASCADE
+);
+
 -- CreateIndex
 CREATE UNIQUE INDEX "Tenant_slug_key" ON "Tenant"("slug");
 
@@ -744,4 +762,10 @@ CREATE INDEX "Confession_tenantId_createdAt_idx" ON "Confession"("tenantId", "cr
 
 -- CreateIndex
 CREATE UNIQUE INDEX "Confession_tenantId_fromUserId_toUserId_status_key" ON "Confession"("tenantId", "fromUserId", "toUserId", "status");
+
+-- CreateIndex
+CREATE INDEX "TenantApplication_status_createdAt_idx" ON "TenantApplication"("status", "createdAt");
+
+-- CreateIndex
+CREATE INDEX "TenantApplication_userId_createdAt_idx" ON "TenantApplication"("userId", "createdAt");
 

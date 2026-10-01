@@ -1,4 +1,4 @@
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { CampuxConfig } from "@campux/config";
 import { Prisma, TransactionIsolationLevel, createManyDedup } from "@campux/db";
 import { z } from "zod";
@@ -30,6 +30,9 @@ import {
   TenantDomainProvisioningError,
 } from "../lib/tenant-domain";
 import { buildUserContainsSearch } from "../lib/user-search";
+import { reviewTenantApplication, resolveTenantCreationPermission, toTenantApplicationSummary } from "../lib/tenant-application";
+import { buildTenantExportBundle } from "../lib/tenant-export";
+import { deleteAttachmentObjects } from "../lib/attachments";
 import type { RuntimeQueue } from "../runtime/queue";
 import type { OneBotRuntime } from "../runtime/onebot";
 import type { EventBus, PluginEvent } from "@campux/plugin";
@@ -65,6 +68,25 @@ const tenantCreateSchema = z.object({
 const paginationQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(50).default(10),
+});
+
+/** 开墙申请列表筛选。 */
+const tenantApplicationQuerySchema = z.object({
+  status: z.enum(["all", "pending", "approved", "rejected"]).default("pending"),
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(50).default(20),
+});
+
+/** 系统运维审核开墙申请。 */
+const tenantApplicationReviewSchema = z.object({
+  action: z.enum(["approve", "reject"]),
+  note: z.string().trim().max(300).optional(),
+});
+
+/** 彻底删除校园墙：必须输入墙名确认，并先下载备份。 */
+const tenantDeleteSchema = z.object({
+  confirmName: z.string().trim().min(1, "请输入校园墙名称以确认删除"),
+  backupAcknowledged: z.boolean(),
 });
 
 const systemUserRoleFilterSchema = platformAssignableRoleSchema;
@@ -189,6 +211,72 @@ function assertCanManageTenant(context: PlatformContext, tenantId: string, reply
 
   reply.code(403);
   throw new Error("只能管理自己所属的校园墙");
+}
+
+/** 只有系统运维可以执行的操作（开墙申请审核、彻底删除校园墙）。 */
+async function requireSystemOperatorContext(request: FastifyRequest, reply: FastifyReply) {
+  const context = await requirePlatformAdmin(request, reply);
+  if (!isSystemOperator(context)) {
+    reply.code(403);
+    throw new Error("该操作只有系统运维可以执行");
+  }
+  return context;
+}
+
+/**
+ * 收集某个校园墙用到对象存储的附件 key。
+ * 数据来自稿件附件、竞选封面/选项图，以及墙面元数据（logo 等）里出现的 tenants/ 前缀字符串。
+ */
+async function collectTenantAttachmentKeys(tenantId: string): Promise<string[]> {
+  const keys = new Set<string>();
+  const pushKey = (value: unknown) => {
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (trimmed.startsWith("tenants/")) {
+        keys.add(trimmed);
+      }
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        pushKey(item);
+      }
+      return;
+    }
+    if (value && typeof value === "object") {
+      const record = value as Record<string, unknown>;
+      if (typeof record.key === "string" && record.key.trim().startsWith("tenants/")) {
+        keys.add(record.key.trim());
+      }
+      for (const item of Object.values(record)) {
+        if (typeof item === "object" && item !== null) {
+          pushKey(item);
+        }
+      }
+    }
+  };
+
+  const [posts, campaigns, metadata] = await Promise.all([
+    prisma.post.findMany({ where: { tenantId }, select: { attachments: true } }),
+    prisma.campaign.findMany({
+      where: { tenantId },
+      select: { coverAttachment: true, options: { select: { imageAttachment: true } } },
+    }),
+    prisma.tenantMetadata.findMany({ where: { tenantId }, select: { value: true } }),
+  ]);
+  for (const post of posts) {
+    pushKey(post.attachments);
+  }
+  for (const campaign of campaigns) {
+    pushKey(campaign.coverAttachment);
+    for (const option of campaign.options) {
+      pushKey(option.imageAttachment);
+    }
+  }
+  for (const entry of metadata) {
+    pushKey(entry.value);
+  }
+  return [...keys];
 }
 
 async function getManagementHost() {
@@ -326,6 +414,155 @@ export function registerSystemRoutes(app: FastifyInstance, queue: RuntimeQueue, 
     };
   });
 
+  // ── 开墙申请（只有系统运维可查看与审核）───────────────
+  app.get("/api/system/tenant-applications", async (request, reply) => {
+    await requireSystemOperatorContext(request, reply);
+    const query = tenantApplicationQuerySchema.parse(request.query);
+    const where: Prisma.TenantApplicationWhereInput = query.status === "all" ? {} : { status: query.status };
+    const [total, pendingCount, applications] = await Promise.all([
+      prisma.tenantApplication.count({ where }),
+      prisma.tenantApplication.count({ where: { status: "pending" } }),
+      prisma.tenantApplication.findMany({
+        where,
+        orderBy: [{ status: "asc" }, { createdAt: "desc" }],
+        skip: (query.page - 1) * query.limit,
+        take: query.limit,
+        include: {
+          user: { select: { id: true, qqUin: true, email: true, displayName: true, createdAt: true } },
+          reviewedBy: { select: { displayName: true, email: true } },
+        },
+      }),
+    ]);
+
+    const userIds = applications.map((item) => item.userId);
+    const administered = userIds.length > 0
+      ? await prisma.tenantMembership.findMany({
+          where: { userId: { in: userIds }, role: "admin" },
+          select: { userId: true, tenant: { select: { id: true, name: true, slug: true, status: true } } },
+        })
+      : [];
+    const tenantsByUser = new Map<string, Array<{ id: string; name: string; slug: string; status: string }>>();
+    for (const membership of administered) {
+      const list = tenantsByUser.get(membership.userId) ?? [];
+      list.push(membership.tenant);
+      tenantsByUser.set(membership.userId, list);
+    }
+
+    return {
+      pendingCount,
+      items: applications.map((application) => ({
+        ...toTenantApplicationSummary(application),
+        applicant: {
+          id: application.user.id,
+          displayName: application.user.displayName,
+          email: application.user.email,
+          qqUin: application.user.qqUin.toString(),
+          registeredAt: application.user.createdAt.toISOString(),
+        },
+        reviewedByName: application.reviewedBy?.displayName ?? application.reviewedBy?.email ?? null,
+        tenants: tenantsByUser.get(application.userId) ?? [],
+      })),
+      pagination: toPagination(query.page, query.limit, total),
+    };
+  });
+
+  app.post("/api/system/tenant-applications/:id/review", async (request, reply) => {
+    const context = await requireSystemOperatorContext(request, reply);
+    const params = z.object({ id: z.string().min(1) }).parse(request.params);
+    const body = tenantApplicationReviewSchema.parse(request.body ?? {});
+    const result = await reviewTenantApplication({
+      applicationId: params.id,
+      reviewerId: context.user.id,
+      action: body.action,
+      note: body.note ?? null,
+    });
+    if (!result.ok) {
+      return reply.code(result.code === "not_found" ? 404 : 409).send({ message: result.message, code: result.code });
+    }
+    await writeAuditLog({
+      tenantId: null,
+      actorId: context.user.id,
+      action: body.action === "approve" ? "tenant.application.approve" : "tenant.application.reject",
+      targetType: "tenant_application",
+      targetId: params.id,
+      detail: {
+        wallName: result.application.wallName,
+        applicantUserId: result.application.id,
+        note: body.note ?? null,
+      },
+    });
+    return { ok: true, application: result.application };
+  });
+
+  // ── 删除前的数据导出 ──────────────────────────────────
+  app.get("/api/system/tenants/:tenantId/export", async (request, reply) => {
+    await requireSystemOperatorContext(request, reply);
+    const params = z.object({ tenantId: z.string().min(1) }).parse(request.params);
+    const bundle = await buildTenantExportBundle(params.tenantId);
+    if (!bundle) {
+      return reply.code(404).send({ message: "校园墙不存在" });
+    }
+    reply.header("content-type", "application/json; charset=utf-8");
+    reply.header(
+      "content-disposition",
+      `attachment; filename="tenant-export-${params.tenantId}-${Date.now()}.json"`,
+    );
+    return bundle;
+  });
+
+  // ── 彻底删除校园墙（仅系统运维，不可恢复）─────────────
+  app.delete("/api/system/tenants/:tenantId", async (request, reply) => {
+    const context = await requireSystemOperatorContext(request, reply);
+    const params = z.object({ tenantId: z.string().min(1) }).parse(request.params);
+    const body = tenantDeleteSchema.parse(request.body ?? {});
+    const tenant = await prisma.tenant.findUnique({
+      where: { id: params.tenantId },
+      select: { id: true, name: true, slug: true, status: true },
+    });
+    if (!tenant) {
+      return reply.code(404).send({ message: "校园墙不存在" });
+    }
+    if (body.confirmName.trim() !== tenant.name) {
+      return reply.code(400).send({ code: "name_mismatch", message: "输入的校园墙名称与要删除的墙不一致" });
+    }
+    if (!body.backupAcknowledged) {
+      return reply.code(400).send({ code: "backup_required", message: "请先导出备份，并确认已保存后再删除" });
+    }
+
+    const attachmentKeys = await collectTenantAttachmentKeys(tenant.id).catch((error) => {
+      request.log.warn({ error, tenantId: tenant.id }, "failed to collect tenant attachment keys");
+      return [] as string[];
+    });
+
+    if (attachmentKeys.length > 0) {
+      await deleteAttachmentObjects(config, attachmentKeys).catch((error) => {
+        request.log.warn({ error, tenantId: tenant.id, count: attachmentKeys.length }, "failed to delete tenant attachments");
+      });
+    }
+
+    // 数据库里所有引用 Tenant 的表都是级联删除；审计日志会把 tenantId 置空以保留历史。
+    await prisma.tenant.delete({ where: { id: tenant.id } });
+    await writeAuditLog({
+      tenantId: null,
+      actorId: context.user.id,
+      action: "tenant.delete",
+      targetType: "tenant",
+      targetId: tenant.id,
+      detail: {
+        name: tenant.name,
+        slug: tenant.slug,
+        previousStatus: tenant.status,
+        deletedAttachments: attachmentKeys.length,
+      },
+    });
+
+    return {
+      ok: true,
+      deletedTenantId: tenant.id,
+      deletedAttachments: attachmentKeys.length,
+    };
+  });
+
   app.get("/api/system/tenants", async (request, reply) => {
     const context = await requirePlatformAdmin(request, reply);
 
@@ -337,6 +574,14 @@ export function registerSystemRoutes(app: FastifyInstance, queue: RuntimeQueue, 
 
   app.post("/api/system/tenants", async (request, reply) => {
     const context = await requirePlatformAdmin(request, reply);
+    // 开墙需要系统运维审核通过：系统运维本人不受限制，其他人必须有已通过的申请且尚无墙。
+    const creationPermission = await resolveTenantCreationPermission(context.user);
+    if (!creationPermission.allowed) {
+      return reply.code(403).send({
+        code: `tenant_create_${creationPermission.code}`,
+        message: creationPermission.message,
+      });
+    }
     const body = tenantCreateSchema.parse(request.body);
     const manualHost = body.host === undefined ? null : normalizeTenantHost(body.host);
     let normalizedHost = manualHost;

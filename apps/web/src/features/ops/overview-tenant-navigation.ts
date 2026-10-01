@@ -1,5 +1,5 @@
 type OverviewTenantNavigationState = {
-  activeSection: "overview" | "tenants" | "users" | "audit" | "platform";
+  activeSection: "overview" | "applications" | "tenants" | "users" | "audit" | "platform";
   selectedTenantId: string;
   tenantKeyword: string;
 };
