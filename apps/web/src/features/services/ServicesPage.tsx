@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { toast } from "sonner";
-import { BookOpenIcon, CheckIcon, ChevronRightIcon, ExternalLinkIcon, KeyRoundIcon, SparklesIcon, UserRoundIcon, WandSparklesIcon } from "lucide-react";
+import { BookOpenIcon, CheckIcon, ChevronRightIcon, ExternalLinkIcon, InfoIcon, KeyRoundIcon, SparklesIcon, UserRoundIcon, WandSparklesIcon } from "lucide-react";
 import { api } from "@/lib/api";
 import { defaultMetadata } from "@/lib/app-model";
 import { getBuiltInServiceEntryAction, isBuiltInServiceEntry, isSafeServiceEntryUrl } from "@/lib/service-entry-editor";
@@ -10,8 +10,13 @@ import { LoadingBlock } from "@/components/app/utility";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { CampaignsPage } from "./CampaignsPage";
+import { AboutPage } from "./AboutPage";
 import { CampaignDetailPage } from "./CampaignDetailPage";
 import { OAuthBindingsPanel } from "./OAuthBindingsPanel";
+import { BroadcastsPage } from "@/features/broadcast/BroadcastsPage";
+import { BroadcastIcon } from "@/features/broadcast/BroadcastIcon";
+import { GraduationsPage } from "@/features/graduation/GraduationsPage";
+import { GraduationIcon } from "@/features/graduation/GraduationIcon";
 import type { Campaign, CampaignFilter } from "./campaign-types";
 
 function parseCampaignRoute(pathname: string, search: string) {
@@ -38,24 +43,24 @@ type ServiceAction = "profile" | "password" | "rules" | "oauth-bindings" | "";
 
 const servicePalettes = [
   {
-    shell: "border-slate-200 bg-white hover:border-blue-200 hover:bg-blue-50/35",
+    shell: "border-slate-200 bg-white hover:border-blue-200 hover:bg-blue-50/35 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-blue-500/50 dark:hover:bg-blue-500/10",
     icon: "product-accent-blue",
   },
   {
-    shell: "border-slate-200 bg-white hover:border-green-200 hover:bg-green-50/35",
+    shell: "border-slate-200 bg-white hover:border-green-200 hover:bg-green-50/35 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-green-500/50 dark:hover:bg-green-500/10",
     icon: "product-accent-green",
   },
   {
-    shell: "border-slate-200 bg-white hover:border-amber-200 hover:bg-amber-50/35",
+    shell: "border-slate-200 bg-white hover:border-amber-200 hover:bg-amber-50/35 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-amber-500/50 dark:hover:bg-amber-500/10",
     icon: "product-accent-amber",
   },
   {
-    shell: "border-slate-200 bg-white hover:border-rose-200 hover:bg-rose-50/35",
+    shell: "border-slate-200 bg-white hover:border-rose-200 hover:bg-rose-50/35 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-rose-500/50 dark:hover:bg-rose-500/10",
     icon: "product-accent-rose",
   },
 ];
 const defaultServicePalette = {
-  shell: "border-slate-200 bg-white hover:border-blue-200 hover:bg-blue-50/35",
+  shell: "border-slate-200 bg-white hover:border-blue-200 hover:bg-blue-50/35 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-blue-500/50 dark:hover:bg-blue-500/10",
   icon: "product-accent-blue",
 };
 
@@ -88,6 +93,15 @@ export function ServicesPage({
   const { accountServices, campusServices } = buildServiceEntries(metadata.services);
   const rules = metadata.postRules.length > 0 ? metadata.postRules : defaultMetadata.postRules;
   const [activeAction, setActiveAction] = useState<ServiceAction>("");
+  const panelsRef = useRef<HTMLDivElement>(null);
+
+  // 账户设置/第三方登录的按钮点击后，对应面板渲染在页面底部；
+  // 自动平滑滚动过去，避免面板出现在视口外。
+  useEffect(() => {
+    if (activeAction) {
+      panelsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [activeAction]);
 
   if (campaignRoute && campaignRoute.view === "detail") {
     return (
@@ -110,6 +124,21 @@ export function ServicesPage({
       />
     );
   }
+  if (window.location.pathname === "/services/broadcasts") {
+    if (!metadata.enableBroadcast) {
+      return <section className="product-surface p-4 text-sm text-slate-500">广播通知插件尚未启用。</section>;
+    }
+    return <BroadcastsPage me={me} metadata={metadata} />;
+  }
+  if (window.location.pathname === "/services/graduations") {
+    if (!metadata.enableGraduation) {
+      return <section className="product-surface p-4 text-sm text-slate-500">毕业去向插件尚未启用。</section>;
+    }
+    return <GraduationsPage me={me} />;
+  }
+  if (window.location.pathname === "/services/about") {
+    return <AboutPage metadata={metadata} onBack={() => navigateTo("/services")} />;
+  }
 
   function openService(service: TenantMetadata["services"][number]) {
     if (service.url) {
@@ -131,7 +160,7 @@ export function ServicesPage({
 
   return (
     <div className="flex h-full min-h-0 flex-col px-4 pt-4">
-      <div className="min-h-0 flex-1 overflow-y-auto pb-24 pr-1 md:pb-6">
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-24 pr-1 md:pb-6">
         {metadata.enableCampaigns ? (
           <button
             onClick={() => navigateTo("/services/campaigns")}
@@ -157,6 +186,36 @@ export function ServicesPage({
             <ChevronRightIcon className="size-5 shrink-0 text-sky-400" />
           </button>
         ) : null}
+        {metadata.enableBroadcast ? (
+          <button
+            onClick={() => navigateTo("/services/broadcasts")}
+            className="mb-4 flex w-full items-center gap-4 rounded-xl border border-orange-200/70 bg-gradient-to-br from-orange-50 via-amber-50 to-rose-100 p-4 text-left shadow-sm transition hover:border-orange-300 hover:shadow-md"
+          >
+            <span className="grid size-12 shrink-0 place-items-center rounded-lg border border-white bg-white/70 shadow-sm">
+              <BroadcastIcon className="size-7" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-base font-bold text-orange-950">广播通知</span>
+              <span className="mt-0.5 block text-xs text-orange-900/60">查看新通知与历史通知，广播员可标记已广播。</span>
+            </span>
+            <ChevronRightIcon className="size-5 shrink-0 text-orange-400" />
+          </button>
+        ) : null}
+        {metadata.enableGraduation ? (
+          <button
+            onClick={() => navigateTo("/services/graduations")}
+            className="mb-4 flex w-full items-center gap-4 rounded-xl border border-violet-200/70 bg-gradient-to-br from-violet-50 via-fuchsia-50 to-pink-100 p-4 text-left shadow-sm transition hover:border-violet-300 hover:shadow-md"
+          >
+            <span className="grid size-12 shrink-0 place-items-center rounded-lg border border-white bg-white/70 shadow-sm">
+              <GraduationIcon className="size-7" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-base font-bold text-violet-950">毕业生去向</span>
+              <span className="mt-0.5 block text-xs text-violet-900/60">用户/学校/时间四视图，支持搜索与待审核队列。</span>
+            </span>
+            <ChevronRightIcon className="size-5 shrink-0 text-violet-400" />
+          </button>
+        ) : null}
         {loading ? <LoadingBlock title="正在加载服务入口..." /> : null}
 
         <section className="product-surface p-4">
@@ -177,7 +236,7 @@ export function ServicesPage({
                 <span className="block text-sm font-semibold text-slate-950">第三方登录</span>
                 <span className="mt-0.5 block text-sm leading-5 text-slate-600">绑定 QQ/微信/支付宝等，登录后可一键扫码登录</span>
               </span>
-              <ChevronRightIcon className="size-4 shrink-0 text-slate-400" />
+              <ChevronRightIcon className="size-4 shrink-0 text-slate-400 dark:text-slate-500" />
             </button>
             ) : null}
           </ServiceGroup>
@@ -191,10 +250,31 @@ export function ServicesPage({
           ) : null}
         </section>
 
-        {activeAction === "profile" ? <ProfilePanel me={me} onSaved={onProfileSaved} /> : null}
-        {activeAction === "password" ? <PasswordPanel onDone={(message) => toast.success(message)} /> : null}
-        {activeAction === "rules" ? <RulesPanel rules={rules} /> : null}
-        {activeAction === "oauth-bindings" ? <OAuthBindingsPanel /> : null}
+        <section className="product-surface mt-4 p-4">
+          <ServiceGroup title="关于服务" description="Campux 产品信息、开源协议与插件清单。">
+            <button
+              type="button"
+              onClick={() => navigateTo("/services/about")}
+              className="flex min-h-16 items-center gap-3 rounded-md border border-slate-200 bg-white p-3 text-left shadow-none transition hover:border-blue-200 hover:bg-blue-50/35"
+            >
+              <span className="grid h-9 w-9 shrink-0 place-items-center rounded-md border product-accent-blue">
+                <InfoIcon className="size-5" strokeWidth={2.1} />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block text-sm font-semibold text-slate-950">关于</span>
+                <span className="mt-0.5 block text-sm leading-5 text-slate-600">版本、部署形态、开发者、技术栈与插件信息</span>
+              </span>
+              <ChevronRightIcon className="size-4 shrink-0 text-slate-400 dark:text-slate-500" />
+            </button>
+          </ServiceGroup>
+        </section>
+
+        <div ref={panelsRef}>
+          {activeAction === "profile" ? <ProfilePanel me={me} onSaved={onProfileSaved} /> : null}
+          {activeAction === "password" ? <PasswordPanel onDone={(message) => toast.success(message)} /> : null}
+          {activeAction === "rules" ? <RulesPanel rules={rules} /> : null}
+          {activeAction === "oauth-bindings" ? <OAuthBindingsPanel /> : null}
+        </div>
       </div>
     </div>
   );
@@ -213,7 +293,7 @@ function ServiceGroup({ title, description, children }: { title: string; descrip
   return (
     <div className="mt-5 first:mt-0">
       <div className="mb-2">
-        <h2 className="text-sm font-semibold text-slate-950">{title}</h2>
+        <h2 className="text-sm font-semibold text-slate-950 dark:text-slate-100">{title}</h2>
         <p className="mt-0.5 text-xs leading-5 text-slate-500">{description}</p>
       </div>
       <div className="grid gap-2 sm:grid-cols-2">{children}</div>
@@ -231,10 +311,10 @@ function ServiceTile({ service, index, compact = false, onOpen }: { service: Ten
         <Icon className="size-5" strokeWidth={2.1} />
       </span>
       <span className="min-w-0 flex-1">
-        <span className="block text-sm font-semibold text-slate-950">{service.title}</span>
-        <span className="mt-0.5 block text-sm leading-5 text-slate-600">{service.description ?? "校园服务"}</span>
+        <span className="block text-sm font-semibold text-slate-950 dark:text-slate-100">{service.title}</span>
+        <span className="mt-0.5 block text-sm leading-5 text-slate-600 dark:text-slate-400">{service.description ?? "校园服务"}</span>
       </span>
-      {service.url ? <ExternalLinkIcon className="size-4 shrink-0 text-slate-400" /> : <ChevronRightIcon className="size-4 shrink-0 text-slate-400" />}
+      {service.url ? <ExternalLinkIcon className="size-4 shrink-0 text-slate-400 dark:text-slate-500" /> : <ChevronRightIcon className="size-4 shrink-0 text-slate-400 dark:text-slate-500" />}
     </button>
   );
 }

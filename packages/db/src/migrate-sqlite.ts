@@ -22,6 +22,10 @@ const LAST_PUBLISH_STARTED_AT_MIGRATION_NAME = "20260724090000_add_bot_last_publ
 const REVIEW_QUEUE_REMINDER_AT_ALL_MIGRATION_NAME = "20260815120000_add_bot_review_queue_reminder_at_all";
 const VOTING_CAMPAIGNS_MIGRATION_NAME = "20260906120000_add_voting_campaigns";
 const CAMPAIGN_ADMIN_ONLY_MIGRATION_NAME = "20260906150000_add_campaign_admin_only";
+const BROADCAST_NOTIFICATIONS_MIGRATION_NAME = "20260924120000_add_broadcast_notifications";
+const TENANT_FEEDBACK_MIGRATION_NAME = "20260913140000_add_tenant_feedback";
+const TENANT_FEEDBACK_MESSAGES_MIGRATION_NAME = "20260913160000_add_tenant_feedback_messages";
+const USER_GRADUATION_MIGRATION_NAME = "20260925120000_add_user_graduation";
 const OLD_PRIVATE_MESSAGE_REPLY = `发送 #注册账号 可以用当前 QQ 注册本校园墙账号。
 发送 #重置密码 可以重置你的登录密码。`;
 const NEW_PRIVATE_MESSAGE_REPLY = `首次私聊会自动注册 Campux 账号。
@@ -380,11 +384,333 @@ function applyVotingCampaignsSqliteMigration(
 }
 
 /**
+ * 广播通知的 SQLite 增量迁移：为老库补 Tenant 编号列与 TenantBroadcast /
+ * TenantBroadcastVersion 两张新表（全新库由刷新后的 baseline 自带，迁移会幂等跳过）。
+ * 与 Campaign 系列一致：SQLite 不建 enum，TenantRole 仍为 TEXT，由应用层校验取值。
+ */
+function applyBroadcastNotificationsSqliteMigration(
+  db: Database,
+  doneNames: Set<string>,
+  applied: string[],
+  skipped: string[],
+  logger: SqliteMigrateLogger,
+): void {
+  const tenantTable = db
+    .query(`SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'Tenant'`)
+    .get() as { present: number } | null;
+  if (!tenantTable) return;
+
+  if (doneNames.has(BROADCAST_NOTIFICATIONS_MIGRATION_NAME)) {
+    skipped.push(BROADCAST_NOTIFICATIONS_MIGRATION_NAME);
+    return;
+  }
+
+  const hasDisplayColumn =
+    db
+      .query(`SELECT 1 AS present FROM pragma_table_info('Tenant') WHERE name = 'nextBroadcastDisplayId'`)
+      .get() !== null;
+  const hasBroadcastTable =
+    db
+      .query(`SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'TenantBroadcast'`)
+      .get() !== null;
+  const hasVersionTable =
+    db
+      .query(`SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'TenantBroadcastVersion'`)
+      .get() !== null;
+
+  logger.info({ migration: BROADCAST_NOTIFICATIONS_MIGRATION_NAME }, "applying sqlite incremental migration");
+  db.exec("BEGIN");
+  try {
+    if (!hasDisplayColumn) {
+      db.exec(`ALTER TABLE "Tenant" ADD COLUMN "nextBroadcastDisplayId" INTEGER NOT NULL DEFAULT 1`);
+    }
+    if (!hasBroadcastTable) {
+      db.exec(
+        `CREATE TABLE "TenantBroadcast" (
+           "id" TEXT NOT NULL PRIMARY KEY,
+           "tenantId" TEXT NOT NULL,
+           "displayId" INTEGER NOT NULL,
+           "authorId" TEXT NOT NULL,
+           "content" TEXT NOT NULL,
+           "endsAt" DATETIME NOT NULL,
+           "broadcastCount" INTEGER NOT NULL DEFAULT 0,
+           "modified" BOOLEAN NOT NULL DEFAULT false,
+           "removedAt" DATETIME,
+           "removedById" TEXT,
+           "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+           "updatedAt" DATETIME NOT NULL,
+           CONSTRAINT "TenantBroadcast_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+           CONSTRAINT "TenantBroadcast_authorId_fkey" FOREIGN KEY ("authorId") REFERENCES "User" ("id") ON DELETE RESTRICT ON UPDATE CASCADE
+         )`,
+      );
+      db.exec(`CREATE UNIQUE INDEX "TenantBroadcast_tenantId_displayId_key" ON "TenantBroadcast"("tenantId", "displayId")`);
+      db.exec(`CREATE INDEX "TenantBroadcast_tenantId_endsAt_idx" ON "TenantBroadcast"("tenantId", "endsAt")`);
+      db.exec(`CREATE INDEX "TenantBroadcast_tenantId_authorId_idx" ON "TenantBroadcast"("tenantId", "authorId")`);
+    }
+    if (!hasVersionTable) {
+      db.exec(
+        `CREATE TABLE "TenantBroadcastVersion" (
+           "id" TEXT NOT NULL PRIMARY KEY,
+           "broadcastId" TEXT NOT NULL,
+           "version" INTEGER NOT NULL,
+           "content" TEXT NOT NULL,
+           "changedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+           "endsAt" DATETIME NOT NULL,
+           "broadcastCount" INTEGER NOT NULL DEFAULT 0,
+           "changedById" TEXT NOT NULL,
+           CONSTRAINT "TenantBroadcastVersion_broadcastId_fkey" FOREIGN KEY ("broadcastId") REFERENCES "TenantBroadcast" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+           CONSTRAINT "TenantBroadcastVersion_changedById_fkey" FOREIGN KEY ("changedById") REFERENCES "User" ("id") ON DELETE RESTRICT ON UPDATE CASCADE
+         )`,
+      );
+      db.exec(`CREATE UNIQUE INDEX "TenantBroadcastVersion_broadcastId_version_key" ON "TenantBroadcastVersion"("broadcastId", "version")`);
+      db.exec(`CREATE INDEX "TenantBroadcastVersion_broadcastId_idx" ON "TenantBroadcastVersion"("broadcastId")`);
+    }
+    db.run(
+      `INSERT INTO "_prisma_migrations"
+         ("id","checksum","migration_name","started_at","finished_at","applied_steps_count")
+       VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)`,
+      [
+        randomUUID(),
+        checksumOf(`ALTER TABLE "Tenant" ADD COLUMN "nextBroadcastDisplayId" INTEGER NOT NULL DEFAULT 1`),
+        BROADCAST_NOTIFICATIONS_MIGRATION_NAME,
+      ],
+    );
+    const violations = db.query("PRAGMA foreign_key_check").all();
+    if (violations.length > 0) {
+      throw new Error(`sqlite migration introduced ${violations.length} foreign-key violation(s)`);
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+
+  doneNames.add(BROADCAST_NOTIFICATIONS_MIGRATION_NAME);
+  applied.push(BROADCAST_NOTIFICATIONS_MIGRATION_NAME);
+  logger.info({ migration: BROADCAST_NOTIFICATIONS_MIGRATION_NAME }, "sqlite incremental migration applied");
+}
+
+/**
+ * 毕业去向的 SQLite 增量迁移：为老库补 Tenant 编号列与 UserGraduation 表。
+ * 与 Campaign / Broadcast 系列一致：SQLite 不建 enum，status 存为 TEXT。
+ */
+function applyUserGraduationSqliteMigration(
+  db: Database,
+  doneNames: Set<string>,
+  applied: string[],
+  skipped: string[],
+  logger: SqliteMigrateLogger,
+): void {
+  const tenantTable = db
+    .query(`SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'Tenant'`)
+    .get() as { present: number } | null;
+  if (!tenantTable) return;
+
+  if (doneNames.has(USER_GRADUATION_MIGRATION_NAME)) {
+    skipped.push(USER_GRADUATION_MIGRATION_NAME);
+    return;
+  }
+
+  const hasDisplayColumn =
+    db
+      .query(`SELECT 1 AS present FROM pragma_table_info('Tenant') WHERE name = 'nextGraduationDisplayId'`)
+      .get() !== null;
+  const hasGraduationTable =
+    db
+      .query(`SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'UserGraduation'`)
+      .get() !== null;
+
+  logger.info({ migration: USER_GRADUATION_MIGRATION_NAME }, "applying sqlite incremental migration");
+  db.exec("BEGIN");
+  try {
+    if (!hasDisplayColumn) {
+      db.exec(`ALTER TABLE "Tenant" ADD COLUMN "nextGraduationDisplayId" INTEGER NOT NULL DEFAULT 1`);
+    }
+    if (!hasGraduationTable) {
+      db.exec(
+        `CREATE TABLE "UserGraduation" (
+           "id" TEXT NOT NULL PRIMARY KEY,
+           "tenantId" TEXT NOT NULL,
+           "displayId" INTEGER NOT NULL,
+           "authorId" TEXT NOT NULL,
+           "graduationYear" INTEGER NOT NULL,
+           "classYear" INTEGER NOT NULL,
+           "education" TEXT NOT NULL,
+           "destination" TEXT NOT NULL,
+           "status" TEXT NOT NULL DEFAULT 'pending_approval',
+           "rejectReason" TEXT,
+           "reviewedById" TEXT,
+           "reviewedAt" DATETIME,
+           "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+           "updatedAt" DATETIME NOT NULL,
+           CONSTRAINT "UserGraduation_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+           CONSTRAINT "UserGraduation_authorId_fkey" FOREIGN KEY ("authorId") REFERENCES "User" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+         )`,
+      );
+      db.exec(`CREATE UNIQUE INDEX "UserGraduation_tenantId_displayId_key" ON "UserGraduation"("tenantId", "displayId")`);
+      db.exec(`CREATE INDEX "UserGraduation_tenantId_status_idx" ON "UserGraduation"("tenantId", "status")`);
+      db.exec(`CREATE INDEX "UserGraduation_tenantId_graduationYear_idx" ON "UserGraduation"("tenantId", "graduationYear")`);
+      db.exec(`CREATE INDEX "UserGraduation_tenantId_classYear_idx" ON "UserGraduation"("tenantId", "classYear")`);
+      db.exec(`CREATE INDEX "UserGraduation_tenantId_destination_idx" ON "UserGraduation"("tenantId", "destination")`);
+      db.exec(`CREATE INDEX "UserGraduation_tenantId_authorId_idx" ON "UserGraduation"("tenantId", "authorId")`);
+    }
+    db.run(
+      `INSERT INTO "_prisma_migrations"
+         ("id","checksum","migration_name","started_at","finished_at","applied_steps_count")
+       VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)`,
+      [
+        randomUUID(),
+        checksumOf(`ALTER TABLE "Tenant" ADD COLUMN "nextGraduationDisplayId" INTEGER NOT NULL DEFAULT 1`),
+        USER_GRADUATION_MIGRATION_NAME,
+      ],
+    );
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+
+  doneNames.add(USER_GRADUATION_MIGRATION_NAME);
+  applied.push(USER_GRADUATION_MIGRATION_NAME);
+  logger.info({ migration: USER_GRADUATION_MIGRATION_NAME }, "sqlite incremental migration applied");
+}
+
+/**
  * 应用 SQLite baseline 建库脚本及后续增量迁移（幂等）。
  *
  * @param baselineSql 内嵌的建库 DDL（sqlite-baseline.sql 文本）
  * @param databaseUrl 形如 `file:./data/campux.db`
  */
+
+/**
+ * TenantFeedback:意见反馈存档表。老库缺表时补建。
+ */
+function applyTenantFeedbackSqliteMigration(
+  db: Database,
+  doneNames: Set<string>,
+  applied: string[],
+  skipped: string[],
+  logger: SqliteMigrateLogger,
+): void {
+  const tenantTable = db
+    .query(`SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'Tenant'`)
+    .get() as { present: number } | null;
+  if (!tenantTable) return;
+
+  if (doneNames.has(TENANT_FEEDBACK_MIGRATION_NAME)) {
+    skipped.push(TENANT_FEEDBACK_MIGRATION_NAME);
+    return;
+  }
+
+  const table = db
+    .query(`SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'TenantFeedback'`)
+    .get() as { present: number } | null;
+  const hasTable = table !== null;
+
+  logger.info({ migration: TENANT_FEEDBACK_MIGRATION_NAME }, "applying sqlite incremental migration");
+  db.exec("BEGIN");
+  try {
+    if (!hasTable) {
+      db.exec(`CREATE TABLE "TenantFeedback" (
+        "id" TEXT NOT NULL PRIMARY KEY,
+        "tenantId" TEXT NOT NULL,
+        "authorId" TEXT NOT NULL,
+        "content" TEXT NOT NULL,
+        "groupMessageId" TEXT,
+        "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT "TenantFeedback_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+        CONSTRAINT "TenantFeedback_authorId_fkey" FOREIGN KEY ("authorId") REFERENCES "User" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+      )`);
+      db.exec(`CREATE INDEX "TenantFeedback_tenantId_createdAt_idx" ON "TenantFeedback"("tenantId", "createdAt")`);
+      db.exec(`CREATE INDEX "TenantFeedback_tenantId_authorId_createdAt_idx" ON "TenantFeedback"("tenantId", "authorId", "createdAt")`);
+    }
+    // 修复已有 TenantFeedback 表：补 groupMessageId 列与索引
+    if (hasTable) {
+      const groupCol = db
+        .query(`SELECT 1 AS present FROM pragma_table_info('TenantFeedback') WHERE name = 'groupMessageId'`)
+        .get() as { present: number } | null;
+      if (!groupCol) {
+        db.exec(`ALTER TABLE "TenantFeedback" ADD COLUMN "groupMessageId" TEXT`);
+      }
+      db.exec(`CREATE INDEX IF NOT EXISTS "TenantFeedback_tenantId_groupMessageId_idx" ON "TenantFeedback"("tenantId", "groupMessageId")`);
+    }
+    const checksumSeed = hasTable ? "create-tenant-feedback-present" : "create-tenant-feedback-missing";
+    db.run(
+      `INSERT INTO "_prisma_migrations"
+         ("id","checksum","migration_name","started_at","finished_at","applied_steps_count")
+       VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)`,
+      [randomUUID(), checksumOf(checksumSeed), TENANT_FEEDBACK_MIGRATION_NAME],
+    );
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+  doneNames.add(TENANT_FEEDBACK_MIGRATION_NAME);
+  applied.push(TENANT_FEEDBACK_MIGRATION_NAME);
+  logger.info({ migration: TENANT_FEEDBACK_MIGRATION_NAME }, "sqlite incremental migration applied");
+}
+
+/**
+ * TenantFeedback.groupMessageId + TenantFeedbackMessage:意见对话。
+ */
+function applyTenantFeedbackMessagesSqliteMigration(
+  db: Database,
+  doneNames: Set<string>,
+  applied: string[],
+  skipped: string[],
+  logger: SqliteMigrateLogger,
+): void {
+  const feedbackTable = db
+    .query(`SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'TenantFeedback'`)
+    .get() as { present: number } | null;
+  if (!feedbackTable) return;
+
+  if (doneNames.has(TENANT_FEEDBACK_MESSAGES_MIGRATION_NAME)) {
+    skipped.push(TENANT_FEEDBACK_MESSAGES_MIGRATION_NAME);
+    return;
+  }
+
+  const messageTable = db
+    .query(`SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'TenantFeedbackMessage'`)
+    .get() as { present: number } | null;
+  const hasMessageTable = messageTable !== null;
+
+  logger.info({ migration: TENANT_FEEDBACK_MESSAGES_MIGRATION_NAME }, "applying sqlite incremental migration");
+  db.exec("BEGIN");
+  try {
+    if (!hasMessageTable) {
+      db.exec(`CREATE TABLE "TenantFeedbackMessage" (
+        "id" TEXT NOT NULL PRIMARY KEY,
+        "feedbackId" TEXT NOT NULL,
+        "tenantId" TEXT NOT NULL,
+        "role" TEXT NOT NULL,
+        "authorId" TEXT,
+        "authorLabel" TEXT,
+        "content" TEXT NOT NULL,
+        "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT "TenantFeedbackMessage_feedbackId_fkey" FOREIGN KEY ("feedbackId") REFERENCES "TenantFeedback" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+      )`);
+      db.exec(`CREATE INDEX "TenantFeedbackMessage_feedbackId_createdAt_idx" ON "TenantFeedbackMessage"("feedbackId", "createdAt")`);
+      db.exec(`CREATE INDEX "TenantFeedbackMessage_tenantId_createdAt_idx" ON "TenantFeedbackMessage"("tenantId", "createdAt")`);
+    }
+    const checksumSeed = hasMessageTable ? "feedback-messages-present" : "feedback-messages-created";
+    db.run(
+      `INSERT INTO "_prisma_migrations"
+         ("id","checksum","migration_name","started_at","finished_at","applied_steps_count")
+       VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)`,
+      [randomUUID(), checksumOf(checksumSeed), TENANT_FEEDBACK_MESSAGES_MIGRATION_NAME],
+    );
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+  doneNames.add(TENANT_FEEDBACK_MESSAGES_MIGRATION_NAME);
+  applied.push(TENANT_FEEDBACK_MESSAGES_MIGRATION_NAME);
+  logger.info({ migration: TENANT_FEEDBACK_MESSAGES_MIGRATION_NAME }, "sqlite incremental migration applied");
+}
+
 export function applySqliteBaseline(
   baselineSql: string,
   databaseUrl: string,
@@ -442,7 +768,7 @@ export function applySqliteBaseline(
       // When the baseline was just applied fresh, the incremental migrations
       // are already embedded in the baseline schema. Record them as done so
       // they are skipped below.
-      for (const name of [FIRST_PRIVATE_MESSAGE_MIGRATION_NAME, LAST_PUBLISH_STARTED_AT_MIGRATION_NAME, REVIEW_QUEUE_REMINDER_AT_ALL_MIGRATION_NAME, VOTING_CAMPAIGNS_MIGRATION_NAME, CAMPAIGN_ADMIN_ONLY_MIGRATION_NAME]) {
+      for (const name of [FIRST_PRIVATE_MESSAGE_MIGRATION_NAME, LAST_PUBLISH_STARTED_AT_MIGRATION_NAME, REVIEW_QUEUE_REMINDER_AT_ALL_MIGRATION_NAME, VOTING_CAMPAIGNS_MIGRATION_NAME, CAMPAIGN_ADMIN_ONLY_MIGRATION_NAME, BROADCAST_NOTIFICATIONS_MIGRATION_NAME, TENANT_FEEDBACK_MIGRATION_NAME, TENANT_FEEDBACK_MESSAGES_MIGRATION_NAME, USER_GRADUATION_MIGRATION_NAME]) {
         if (!doneNames.has(name)) {
           doneNames.add(name);
           skipped.push(name);
@@ -462,6 +788,10 @@ export function applySqliteBaseline(
     applyReviewQueueReminderAtAllSqliteMigration(db, doneNames, applied, skipped, logger);
     applyVotingCampaignsSqliteMigration(db, doneNames, applied, skipped, logger);
     applyCampaignAdminOnlySqliteMigration(db, doneNames, applied, skipped, logger);
+    applyTenantFeedbackSqliteMigration(db, doneNames, applied, skipped, logger);
+    applyTenantFeedbackMessagesSqliteMigration(db, doneNames, applied, skipped, logger);
+    applyBroadcastNotificationsSqliteMigration(db, doneNames, applied, skipped, logger);
+    applyUserGraduationSqliteMigration(db, doneNames, applied, skipped, logger);
     return { applied, skipped };
   } finally {
     db.close();

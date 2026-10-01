@@ -8,6 +8,8 @@ CREATE TABLE "Tenant" (
     "themeColor" TEXT NOT NULL DEFAULT '#e0574f',
     "nextPostDisplayId" INTEGER NOT NULL DEFAULT 1,
     "nextCampaignDisplayId" INTEGER NOT NULL DEFAULT 1,
+    "nextBroadcastDisplayId" INTEGER NOT NULL DEFAULT 1,
+    "nextGraduationDisplayId" INTEGER NOT NULL DEFAULT 1,
     "readyAt" DATETIME,
     "archiveWarningAt" DATETIME,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -28,6 +30,38 @@ CREATE TABLE "User" (
     "disabledAt" DATETIME,
     "disabledReason" TEXT,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- CreateTable
+CREATE TABLE "TenantBroadcast" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "tenantId" TEXT NOT NULL,
+    "displayId" INTEGER NOT NULL,
+    "authorId" TEXT NOT NULL,
+    "content" TEXT NOT NULL,
+    "endsAt" DATETIME NOT NULL,
+    "broadcastCount" INTEGER NOT NULL DEFAULT 0,
+    "modified" BOOLEAN NOT NULL DEFAULT false,
+    "removedAt" DATETIME,
+    "removedById" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "TenantBroadcast_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "TenantBroadcast_authorId_fkey" FOREIGN KEY ("authorId") REFERENCES "User" ("id") ON DELETE RESTRICT ON UPDATE CASCADE
+);
+
+-- CreateTable
+CREATE TABLE "TenantBroadcastVersion" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "broadcastId" TEXT NOT NULL,
+    "version" INTEGER NOT NULL,
+    "content" TEXT NOT NULL,
+    "changedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "endsAt" DATETIME NOT NULL,
+    "broadcastCount" INTEGER NOT NULL DEFAULT 0,
+    "changedById" TEXT NOT NULL,
+    CONSTRAINT "TenantBroadcastVersion_broadcastId_fkey" FOREIGN KEY ("broadcastId") REFERENCES "TenantBroadcast" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "TenantBroadcastVersion_changedById_fkey" FOREIGN KEY ("changedById") REFERENCES "User" ("id") ON DELETE RESTRICT ON UPDATE CASCADE
 );
 
 -- CreateTable
@@ -84,6 +118,26 @@ CREATE TABLE "TenantMembership" (
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "TenantMembership_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
     CONSTRAINT "TenantMembership_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
+CREATE TABLE "UserGraduation" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "tenantId" TEXT NOT NULL,
+    "displayId" INTEGER NOT NULL,
+    "authorId" TEXT NOT NULL,
+    "graduationYear" INTEGER NOT NULL,
+    "classYear" INTEGER NOT NULL,
+    "education" TEXT NOT NULL,
+    "destination" TEXT NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'pending_approval',
+    "rejectReason" TEXT,
+    "reviewedById" TEXT,
+    "reviewedAt" DATETIME,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "UserGraduation_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "UserGraduation_authorId_fkey" FOREIGN KEY ("authorId") REFERENCES "User" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 -- CreateTable
@@ -534,6 +588,31 @@ CREATE TABLE "TenantApplication" (
     CONSTRAINT "TenantApplication_reviewedById_fkey" FOREIGN KEY ("reviewedById") REFERENCES "User" ("id") ON DELETE SET NULL ON UPDATE CASCADE
 );
 
+-- CreateTable
+CREATE TABLE "TenantFeedback" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "tenantId" TEXT NOT NULL,
+    "authorId" TEXT NOT NULL,
+    "content" TEXT NOT NULL,
+    "groupMessageId" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "TenantFeedback_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "TenantFeedback_authorId_fkey" FOREIGN KEY ("authorId") REFERENCES "User" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
+CREATE TABLE "TenantFeedbackMessage" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "feedbackId" TEXT NOT NULL,
+    "tenantId" TEXT NOT NULL,
+    "role" TEXT NOT NULL,
+    "authorId" TEXT,
+    "authorLabel" TEXT,
+    "content" TEXT NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "TenantFeedbackMessage_feedbackId_fkey" FOREIGN KEY ("feedbackId") REFERENCES "TenantFeedback" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
 -- CreateIndex
 CREATE UNIQUE INDEX "Tenant_slug_key" ON "Tenant"("slug");
 
@@ -545,6 +624,21 @@ CREATE UNIQUE INDEX "User_qqUin_key" ON "User"("qqUin");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "User_email_key" ON "User"("email");
+
+-- CreateIndex
+CREATE INDEX "TenantBroadcast_tenantId_endsAt_idx" ON "TenantBroadcast"("tenantId", "endsAt");
+
+-- CreateIndex
+CREATE INDEX "TenantBroadcast_tenantId_authorId_idx" ON "TenantBroadcast"("tenantId", "authorId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "TenantBroadcast_tenantId_displayId_key" ON "TenantBroadcast"("tenantId", "displayId");
+
+-- CreateIndex
+CREATE INDEX "TenantBroadcastVersion_broadcastId_idx" ON "TenantBroadcastVersion"("broadcastId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "TenantBroadcastVersion_broadcastId_version_key" ON "TenantBroadcastVersion"("broadcastId", "version");
 
 -- CreateIndex
 CREATE INDEX "OAuthIdentity_userId_idx" ON "OAuthIdentity"("userId");
@@ -572,6 +666,24 @@ CREATE INDEX "TenantMembership_userId_idx" ON "TenantMembership"("userId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "TenantMembership_tenantId_userId_key" ON "TenantMembership"("tenantId", "userId");
+
+-- CreateIndex
+CREATE INDEX "UserGraduation_tenantId_status_idx" ON "UserGraduation"("tenantId", "status");
+
+-- CreateIndex
+CREATE INDEX "UserGraduation_tenantId_graduationYear_idx" ON "UserGraduation"("tenantId", "graduationYear");
+
+-- CreateIndex
+CREATE INDEX "UserGraduation_tenantId_classYear_idx" ON "UserGraduation"("tenantId", "classYear");
+
+-- CreateIndex
+CREATE INDEX "UserGraduation_tenantId_destination_idx" ON "UserGraduation"("tenantId", "destination");
+
+-- CreateIndex
+CREATE INDEX "UserGraduation_tenantId_authorId_idx" ON "UserGraduation"("tenantId", "authorId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "UserGraduation_tenantId_displayId_key" ON "UserGraduation"("tenantId", "displayId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "TenantMetadata_tenantId_key_key" ON "TenantMetadata"("tenantId", "key");
@@ -770,4 +882,17 @@ CREATE INDEX "TenantApplication_status_createdAt_idx" ON "TenantApplication"("st
 
 -- CreateIndex
 CREATE INDEX "TenantApplication_userId_createdAt_idx" ON "TenantApplication"("userId", "createdAt");
+CREATE INDEX "TenantFeedback_tenantId_createdAt_idx" ON "TenantFeedback"("tenantId", "createdAt");
+
+-- CreateIndex
+CREATE INDEX "TenantFeedback_tenantId_authorId_createdAt_idx" ON "TenantFeedback"("tenantId", "authorId", "createdAt");
+
+-- CreateIndex
+CREATE INDEX "TenantFeedback_tenantId_groupMessageId_idx" ON "TenantFeedback"("tenantId", "groupMessageId");
+
+-- CreateIndex
+CREATE INDEX "TenantFeedbackMessage_feedbackId_createdAt_idx" ON "TenantFeedbackMessage"("feedbackId", "createdAt");
+
+-- CreateIndex
+CREATE INDEX "TenantFeedbackMessage_tenantId_createdAt_idx" ON "TenantFeedbackMessage"("tenantId", "createdAt");
 

@@ -20,7 +20,12 @@ export type PresetPluginId =
   | "botStylishMessages"
   | "campaigns"
   | "confessions"
-  | "aggregateLogin";
+  | "aggregateLogin"
+  | "broadcast"
+  | "feedback"
+  | "botAlert"
+  | "graduation"
+  | "todayInHistory";
 
 export interface PresetPluginEntry {
   /** tenant_metadata.plugin_config 的 section 名 */
@@ -106,6 +111,51 @@ export const PRESET_PLUGINS: PresetPluginEntry[] = [
     required: ["config:read", "db:read", "db:write", "tenant:data", "user:data"],
     riskLevel: "medium",
     rationale: "表白记录含双方 QQ 号与私密正文，并会在互相表白后自动私聊双方；插件关闭后入口、命令与通知全部停用。",
+  },
+  {
+    id: "broadcast",
+    name: "campux-plugin-broadcast",
+    version: "1.0.0",
+    description: "广播通知：投稿页发起有时效的校园通知，广播员可手动标记已广播，管理员可下架",
+    required: ["config:read", "db:read", "db:write", "tenant:data", "user:data"],
+    riskLevel: "medium",
+    rationale: "开启后投稿页新增发起入口与服务页管理入口；通知内容、广播计数与作者头像均接入租户与用户数据。",
+  },
+  {
+    id: "feedback",
+    name: "campux-plugin-feedback",
+    version: "1.0.0",
+    description: "意见反馈：投稿页顶部入口，提交后通知审核群",
+    required: ["config:read", "db:read", "db:write", "tenant:data", "user:data"],
+    riskLevel: "medium",
+    rationale: "开启后用户可提交文字意见并通知审核群；需读写插件配置，并关联投稿人身份与租户数据。",
+  },
+  {
+    id: "botAlert",
+    name: "campux-plugin-bot-alert",
+    version: "1.0.0",
+    description: "Bot 异常通知：登录态失效自动刷新失败时邮件通知管理员",
+    required: ["config:read", "db:read", "db:write", "tenant:data"],
+    riskLevel: "medium",
+    rationale: "开启后检测到 QZone 登录态失效且自动刷新失败时，向配置的邮箱发送通知；需读写插件配置与租户数据。",
+  },
+  {
+    id: "graduation",
+    name: "campux-plugin-graduation",
+    version: "1.0.0",
+    description: "毕业去向：投稿页填写届/级与学历，提交毕业去向，审核通过后进入服务页四视图统计",
+    required: ["config:read", "db:read", "db:write", "tenant:data", "user:data"],
+    riskLevel: "medium",
+    rationale: "开启后投稿页与服务页新增毕业去向入口；毕业信息（届/级/学历/去向）与作者 QQ 关联，仅供审核员统计查阅。",
+  },
+  {
+    id: "todayInHistory",
+    name: "campux-plugin-today-in-history",
+    version: "1.0.0",
+    description: "那年今日：投稿页胶囊展示历史上同一月同一日的已发布稿件，按年份倒序分组",
+    required: ["config:read", "db:read", "tenant:data", "user:data"],
+    riskLevel: "low",
+    rationale: "开启后投稿页新增那年今日入口，仅读取已发布稿件并按年月日筛选，不写入任何数据。",
   },
 ];
 

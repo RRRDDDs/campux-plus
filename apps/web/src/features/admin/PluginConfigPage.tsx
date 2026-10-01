@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement, ReactNode } from "react";
 import { ChevronDownIcon, ChevronRightIcon, FileTextIcon, HeartIcon, KeyRoundIcon, LoaderIcon, PowerIcon, SaveIcon, ShieldCheckIcon, ShieldIcon, UserIcon } from "lucide-react";
 import { toast } from "sonner";
 import { FONT_OPTIONS } from "@campux/domain";
-import type { BotMessageTypeConfig, PluginColorPreset, TenantMetadata, TenantPluginConfig } from "@/types/app";
+import type { AdminMember, BotMessageTypeConfig, PluginBroadcastPreset, PluginColorPreset, TenantMetadata, TenantPluginConfig, TenantRole } from "@/types/app";
 import { api } from "@/lib/api";
 import { builtInSvgAvatarFilenames } from "@/lib/built-in-svg-avatars";
 import { filterPluginAuditLogs } from "./plugin-audit-log-filter";
@@ -12,6 +12,12 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { roleLabels } from "@/lib/app-model";
+import { BroadcastIcon } from "../broadcast/BroadcastIcon";
+import { GraduationIcon } from "../graduation/GraduationIcon";
 
 type PluginIconProps = { className?: string };
 
@@ -84,7 +90,7 @@ export function CampaignsIcon({ className }: PluginIconProps) {
   );
 }
 
-type PluginId = "markdownRender" | "colorSelection" | "fontSelection" | "anonymousAvatar" | "botStylishMessages" | "campaigns" | "confessions" | "aggregateLogin";
+type PluginId = "markdownRender" | "colorSelection" | "fontSelection" | "anonymousAvatar" | "botStylishMessages" | "campaigns" | "confessions" | "aggregateLogin" | "broadcast" | "feedback" | "botAlert" | "graduation" | "todayInHistory";
 type PluginPermission = "db:read" | "db:write" | "events:emit" | "events:listen" | "http:route" | "config:read" | "tenant:data" | "user:data";
 
 type PluginRisk = "low" | "medium" | "high";
@@ -151,6 +157,11 @@ const PRESET_NAME_BY_ID: PresetNameByConfigId = {
   campaigns: "campux-plugin-campaigns",
   confessions: "campux-plugin-confessions",
   aggregateLogin: "campux-plugin-aggregate-login",
+  broadcast: "campux-plugin-broadcast",
+  feedback: "campux-plugin-feedback",
+  botAlert: "campux-plugin-bot-alert",
+  graduation: "campux-plugin-graduation",
+  todayInHistory: "campux-plugin-today-in-history",
 };
 
 // 侧栏只展示预设插件；已启用计数与条目高亮也只统计预设插件的 registry 状态。
@@ -167,6 +178,151 @@ const PERMISSION_LABELS: Record<PluginPermission, string> = {
   "tenant:data": "访问租户数据",
   "user:data": "访问用户数据",
 };
+
+function BotAlertIcon({ className }: PluginIconProps) {
+  return (
+    <svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" className={className} fill="none">
+      <path d="M313.2416 0H716.8a307.2 307.2 0 0 1 307.2 307.2v198.0928A484.2496 484.2496 0 0 1 793.6 563.2 486.4 486.4 0 0 1 313.2416 0z" fill="#20C997" />
+      <path d="M909.824 785.5104a51.2 51.2 0 1 1 95.5904 36.7616A307.3024 307.3024 0 0 1 716.8 1024H307.2a307.2 307.2 0 0 1-307.2-307.2V307.2a307.2 307.2 0 0 1 307.2-307.2h409.6a307.2 307.2 0 0 1 307.2 307.2v204.8a51.2 51.2 0 0 1-102.4 0V307.2a204.8 204.8 0 0 0-204.8-204.8H307.2a204.8 204.8 0 0 0-204.8 204.8v409.6a204.8 204.8 0 0 0 204.8 204.8h409.6a204.9024 204.9024 0 0 0 193.024-136.0896zM299.1104 628.1728l-54.528 67.328a51.2 51.2 0 1 1-79.5648-64.4608l88.832-109.6704a51.2 51.2 0 0 1 74.4448-5.4784l60.416 55.5008L478.208 291.584c14.592-45.5168 78.0288-48.0256 96.1536-3.7888l132.3008 323.1744 69.632-88.9344a51.2 51.2 0 0 1 80.64 63.1296l-124.0064 158.3104a51.2 51.2 0 0 1-87.6544-12.1856L532.8896 456.704 461.824 678.8608a51.2 51.2 0 0 1-83.4048 22.1184l-79.2576-72.8064z" fill="#2C6DD2" />
+    </svg>
+  );
+}
+
+function FeedbackIcon({ className }: PluginIconProps) {
+  return (
+    <svg viewBox="0 0 1126 1024" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" className={className} fill="none">
+      <path d="M652.98432 827.2896c-15.72352 26.19392-26.20416 52.38784-26.20416 83.83488 0 10.49088 10.48064 20.9664 20.9664 20.9664h5.23776c31.4368 0 57.64096-10.47552 78.60736-26.19392l141.47584-151.97184-83.83488-73.35936-136.24832 146.72384z m282.96704-204.36992l-20.9664-20.95104c-15.71328-15.7184-41.92256-15.7184-57.64096 0l-26.20416 26.1888 83.84512 73.3696 20.9664-20.9664c20.95616-15.71328 20.95616-41.91744 0-57.64096z m-89.08288-162.43712V198.4768c0-26.19904-5.23776-52.39808-26.20416-73.35936-20.96128-15.7184-52.39808-31.4368-78.60224-31.4368H270.45376c-31.4368 0-57.64096 15.7184-78.59712 31.4368-15.72352 20.96128-26.20416 47.16032-26.20416 73.35936v576.41984c0 57.63584 47.16032 104.78592 104.80128 104.78592h209.60256c26.20416 0 52.39808-36.66432 68.12672-57.63072l272.48128-293.44256c20.9664-15.72352 26.20416-41.92256 26.20416-68.12672z m-314.40896 261.99552H270.45376v-52.39296h262.00064v52.39296z m104.80128-209.59232H270.45376V460.48256h366.80704v52.4032z m104.8064-209.60256H270.45376V250.88512h471.60832v52.39808z m0 0" fill="#98CA6B" />
+    </svg>
+  );
+}
+
+function FeedbackPanel() {
+  return (
+    <div className="space-y-4">
+      <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
+        开启后，投稿页最上方会出现「意见反馈」入口。意见会先保存；墙号在线且已开启审核群通知时会同步到审核群，否则仅保存并提示通知失败。
+      </div>
+    </div>
+  );
+}
+
+function BotAlertPanel({ config, onChange, busy }: { config: TenantPluginConfig; onChange: (next: TenantPluginConfig) => void; busy: boolean }) {
+  const alert = config.botAlert;
+  const [portText, setPortText] = useState(String(alert.smtpPort));
+  // 收件邮箱行使用稳定 id 作为 React key：编辑/删除行时焦点元素不会被复用到别的收件人上。
+  const rowIdRef = useRef(0);
+  const nextRowId = () => ++rowIdRef.current;
+  const [emailRows, setEmailRows] = useState(() => alert.toEmails.map((value) => ({ id: nextRowId(), value })));
+  // 本面板最近写出的 toEmails（JSON 快照）：区分「自己输入引发的 props 变化」与「外部刷新」
+  //（保存清理、重新拉取配置），只有后者才重建行列表。
+  const pushedEmailsRef = useRef<string | null>(null);
+  useEffect(() => {
+    const incoming = JSON.stringify(alert.toEmails);
+    if (pushedEmailsRef.current !== incoming) {
+      setEmailRows(alert.toEmails.map((value) => ({ id: nextRowId(), value })));
+    }
+  }, [alert.toEmails]);
+  const set = (patch: Partial<TenantPluginConfig["botAlert"]>) => {
+    onChange({ ...config, botAlert: { ...alert, ...patch } });
+  };
+  const updateEmailRows = (rows: Array<{ id: number; value: string }>) => {
+    setEmailRows(rows);
+    const values = rows.map((row) => row.value);
+    pushedEmailsRef.current = JSON.stringify(values);
+    set({ toEmails: values });
+  };
+  return (
+    <div className="space-y-4">
+      <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
+        开启后，当 QZone 登录态失效且自动刷新失败时，向收件邮箱发送异常通知。请先配置 SMTP 服务器与收件邮箱；
+        保存设置前会先发送测试邮件，测试通过后才会保存。
+      </div>
+      <div className="grid gap-3">
+        <label className="grid gap-1 text-xs font-semibold text-slate-600">
+          SMTP 服务器
+          <Input value={alert.smtpHost} disabled={busy} placeholder="smtp.example.com" onChange={(e) => set({ smtpHost: e.target.value })} />
+        </label>
+        <label className="grid gap-1 text-xs font-semibold text-slate-600">
+          SMTP 端口
+          <Input type="number" value={portText} disabled={busy} onChange={(e) => setPortText(e.target.value)} onBlur={() => set({ smtpPort: Number(portText) || 465 })} />
+        </label>
+        <label className="grid gap-1 text-xs font-semibold text-slate-600">
+          发件邮箱
+          <Input value={alert.fromEmail} disabled={busy} placeholder="bot@example.com" onChange={(e) => set({ fromEmail: e.target.value })} />
+        </label>
+        <label className="grid gap-1 text-xs font-semibold text-slate-600">
+          邮箱账号
+          <Input value={alert.smtpUser} disabled={busy} onChange={(e) => set({ smtpUser: e.target.value })} />
+        </label>
+        <label className="grid gap-1 text-xs font-semibold text-slate-600">
+          邮箱密码/授权码
+          <Input type="password" value={alert.smtpPass} disabled={busy} onChange={(e) => set({ smtpPass: e.target.value })} />
+        </label>
+        <div className="space-y-1">
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-semibold text-slate-600">收件邮箱</p>
+            <Button size="sm" variant="outline" disabled={busy || emailRows.length >= 20} onClick={() => updateEmailRows([...emailRows, { id: nextRowId(), value: "" }])}>
+              + 新增收件邮箱（{emailRows.length}/20）
+            </Button>
+          </div>
+          {emailRows.length === 0 ? (
+            <div className="rounded-md border border-dashed border-slate-300 bg-slate-50 p-3 text-xs text-slate-500">
+              暂未配置收件邮箱，点击「新增收件邮箱」逐个添加。
+            </div>
+          ) : (
+            <div className="grid gap-2">
+              {emailRows.map((row, index) => (
+                <div key={row.id} className="grid grid-cols-[1fr_auto] items-center gap-2">
+                  <Input
+                    value={row.value}
+                    placeholder={`收件邮箱 ${index + 1}`}
+                    disabled={busy}
+                    onChange={(e) => updateEmailRows(emailRows.map((item) => (item.id === row.id ? { ...item, value: e.target.value } : item)))}
+                  />
+                  <Button size="sm" variant="ghost" disabled={busy} onClick={() => updateEmailRows(emailRows.filter((item) => item.id !== row.id))}>删除</Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy || !alert.smtpHost || !alert.smtpUser || !alert.smtpPass || !alert.fromEmail || emailRows.length === 0}
+            onClick={async () => {
+              // 与保存门禁一致：先丢弃空行，再拿清理后的列表发测试邮件。
+              const cleaned = emailRows.map((row) => row.value.trim()).filter(Boolean);
+              if (cleaned.length === 0) {
+                toast.error("请先填写至少一个收件邮箱");
+                return;
+              }
+              try {
+                const res = await api<{ ok: boolean; message: string }>("/api/admin/plugins/bot-alert/test", {
+                  method: "POST",
+                  body: JSON.stringify({
+                    smtpHost: alert.smtpHost,
+                    smtpPort: alert.smtpPort,
+                    smtpUser: alert.smtpUser,
+                    smtpPass: alert.smtpPass,
+                    fromEmail: alert.fromEmail,
+                    toEmails: cleaned,
+                  }),
+                });
+                toast.success(res.message || "测试邮件已发送");
+              } catch (caught) {
+                toast.error(caught instanceof Error ? caught.message : "测试发送失败");
+              }
+            }}
+          >
+            发送测试邮件
+          </Button>
+          <span className="text-xs text-slate-400">发送一封标题为「测试」的邮件验证配置</span>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function MarkdownRenderPanel({ config, onChange, busy }: { config: TenantPluginConfig; onChange: (next: TenantPluginConfig) => void; busy: boolean }) {
   return (
@@ -667,6 +823,111 @@ function BotStylishPanel({ config, onChange, busy }: { config: TenantPluginConfi
 }
 
 
+// 与后端 tenantPluginConfigSchema 的 BROADCAST_PRESET_MAX_COUNT 保持一致。
+const BROADCAST_PRESET_MAX = 5;
+
+function BroadcastPresetEditor({ values, disabled, onChange }: { values: PluginBroadcastPreset[]; disabled?: boolean; onChange: (next: PluginBroadcastPreset[]) => void }) {
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-medium text-slate-900">快选生效时长</p>
+          <p className="text-xs text-slate-500">发帖人点一下即按当前时刻推算结束时间（最多 5 个）。</p>
+        </div>
+        <Button size="sm" variant="outline" disabled={disabled || values.length >= BROADCAST_PRESET_MAX} onClick={() => onChange([...values, { label: "", minutes: 60 }])}>
+          + 新增预设
+        </Button>
+      </div>
+      {values.length === 0 ? (
+        <div className="rounded-md border border-dashed border-slate-300 bg-slate-50 p-3 text-xs text-slate-500">
+          暂未配置，发帖人只能手动选择日期与时间。
+        </div>
+      ) : (
+        <div className="grid gap-2">
+          {values.map((preset, index) => (
+            <div key={index} className="grid grid-cols-[1fr_112px_40px] items-center gap-2 rounded-md border border-slate-200 bg-white p-2">
+              <Input value={preset.label} placeholder="名称，如「半小时内」" disabled={disabled} onChange={(event) => onChange(values.map((item, itemIndex) => (itemIndex === index ? { ...item, label: event.target.value } : item)))} />
+              <div className="flex items-center gap-1">
+                <Input type="number" min={1} max={10080} value={preset.minutes} disabled={disabled} onChange={(event) => onChange(values.map((item, itemIndex) => (itemIndex === index ? { ...item, minutes: Number(event.target.value) } : item)))} />
+                <span className="text-xs text-slate-400">分钟</span>
+              </div>
+              <Button size="sm" variant="ghost" disabled={disabled} onClick={() => onChange(values.filter((_, itemIndex) => itemIndex !== index))}>删除</Button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BroadcastPanel({ config, onChange, busy }: { config: TenantPluginConfig; onChange: (next: TenantPluginConfig) => void; busy: boolean }) {
+  const setBroadcast = (patch: Partial<TenantPluginConfig["broadcast"]>) => {
+    onChange({ ...config, broadcast: { ...config.broadcast, ...patch } });
+  };
+  return (
+    <div className="space-y-4">
+      <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
+        开启后，投稿页顶部会多出「广播通知」胶囊，服务页出现广播通知入口。
+      </div>
+      <div className="rounded-md border border-slate-200 bg-white p-3">
+        <BroadcastPresetEditor
+          values={config.broadcast.quickPresets}
+          disabled={busy}
+          onChange={(quickPresets) => setBroadcast({ quickPresets })}
+        />
+      </div>
+      <div className="rounded-md border border-slate-200 bg-white p-3 text-xs leading-5 text-slate-600">
+        通知内容在投稿页填写，时效结束时间最长 7 天；
+        「已广播」与「违规删除」按钮由管理员在用户管理中授予「广播员」身份的用户使用。
+      </div>
+    </div>
+  );
+}
+
+function TodayInHistoryIcon({ className }: PluginIconProps) {
+  return (
+    <svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" className={className}>
+      <path d="M511.512381 521.264762m-458.849524 0a458.849524 458.849524 0 1 0 917.699048 0 458.849524 458.849524 0 1 0-917.699048 0Z" fill="#FF7396" />
+      <path d="M511.512381 521.264762m-291.596191 0a291.59619 291.59619 0 1 0 583.192381 0 291.59619 291.59619 0 1 0-583.192381 0Z" fill="#FFC800" />
+      <path d="M511.512381 278.430476c134.095238 0 242.834286 108.739048 242.834286 242.834286s-108.739048 242.834286-242.834286 242.834286-242.834286-108.739048-242.834286-242.834286c0-134.095238 108.739048-242.834286 242.834286-242.834286m0-48.761905c-160.914286 0-291.59619 130.681905-291.596191 291.596191s130.681905 291.59619 291.596191 291.59619 291.59619-130.681905 291.59619-291.59619-130.681905-291.59619-291.59619-291.596191z" fill="#D84475" />
+      <path d="M320.365714 487.619048c-1.950476 0-3.900952-0.487619-5.851428-0.975238-10.24-2.925714-16.091429-14.140952-13.165715-24.380953 1.462857-3.900952 2.438095-8.289524 3.900953-12.190476 8.289524-23.405714 20.48-45.348571 36.571428-64.853333 6.826667-8.289524 19.017143-9.752381 27.306667-2.925715 8.289524 6.826667 9.752381 19.017143 2.925714 27.306667-13.165714 16.091429-22.918095 34.133333-29.744762 53.150476-0.975238 3.413333-2.438095 6.826667-3.413333 10.24-2.438095 9.264762-10.24 14.628571-18.529524 14.628572zM430.08 360.350476c-7.314286 0-14.628571-4.388571-17.554286-11.215238-4.388571-9.752381-0.487619-21.455238 9.264762-25.843809 8.777143-4.388571 18.041905-7.801905 27.794286-10.727619 10.24-3.413333 21.455238 2.438095 24.380952 12.678095 3.413333 10.24-2.438095 21.455238-12.678095 24.380952-7.801905 2.438095-15.60381 5.36381-22.918095 8.777143-2.925714 1.462857-5.851429 1.950476-8.289524 1.950476z" fill="#FFFFFF" />
+      <path d="M511.512381 1004.495238h-2.438095c-129.219048-0.487619-250.148571-51.687619-340.845715-143.36-90.697143-91.672381-140.434286-213.577143-139.946666-342.308571 0-13.653333 11.215238-24.380952 24.380952-24.380953 13.653333 0 24.380952 11.215238 24.380953 24.380953-0.487619 116.053333 43.885714 225.28 125.805714 307.687619s190.659048 128.24381 306.712381 128.731428h2.438095c115.078095 0 223.817143-44.373333 305.737143-125.805714 82.407619-81.432381 128.24381-190.659048 128.731428-306.712381 0.975238-239.420952-192.609524-435.44381-432.518095-436.906667h-2.438095c-110.201905 0-215.527619 41.447619-295.984762 116.540953-10.727619 10.727619-27.794286 12.190476-39.497143 2.438095-7.801905-6.339048-11.702857-16.091429-10.24-26.331429l9.264762-130.681904c0.975238-13.653333 12.678095-23.405714 25.84381-22.430477 13.653333 0.975238 23.405714 12.678095 22.430476 25.84381l-5.851429 85.820952C301.348571 73.142857 404.23619 38.034286 511.512381 38.034286h2.438095c266.24 1.462857 482.255238 219.428571 480.792381 485.668571-0.487619 129.219048-51.687619 250.148571-143.36 340.845714-91.184762 90.209524-211.626667 139.946667-339.870476 139.946667z" fill="#D84475" />
+      <path d="M414.47619 599.771429c-7.801905 0-15.11619-3.413333-19.99238-10.24-7.801905-11.215238-4.87619-26.331429 5.851428-34.133334l87.771429-61.44 65.340952-129.706666c5.851429-12.190476 20.48-17.066667 32.670476-10.727619 12.190476 5.851429 17.066667 20.48 10.727619 32.670476l-67.779047 135.070476c-1.950476 3.413333-4.388571 6.826667-7.801905 9.264762l-93.135238 64.853333c-3.900952 2.925714-8.777143 4.388571-13.653334 4.388572z" fill="#D84475" />
+    </svg>
+  );
+}
+
+function TodayInHistoryPanel({ busy }: { config: TenantPluginConfig; onChange: (next: TenantPluginConfig) => void; busy: boolean }) {
+  void busy;
+  return (
+    <div className="space-y-4">
+      <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
+        开启后，投稿页顶部会多出「那年今日」胶囊，展示历史上同一月同一日发布的稿件，按年份倒序分组。
+      </div>
+      <div className="rounded-md border border-slate-200 bg-white p-3 text-xs leading-5 text-slate-600">
+        数据来自本校园墙的已发布稿件，仅读取不写入；日期按校园墙所在时区（Asia/Shanghai）的日历日判定。
+      </div>
+    </div>
+  );
+}
+
+function GraduationPanel({ busy }: { config: TenantPluginConfig; onChange: (next: TenantPluginConfig) => void; busy: boolean }) {
+  return (
+    <div className="space-y-4">
+      <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
+        开启后，投稿页顶部会多出「毕业去向」胶囊，服务页新增毕业生去向入口（用户/学校/时间/搜索四视图）。
+        提交后进入审核队列，审核员可手动通过或驳回。
+      </div>
+      <div className="rounded-md border border-slate-200 bg-white p-3 text-xs leading-5 text-slate-600">
+        入学年份（级）与毕业年份（届）均由投稿人在表单里自行填写，本插件无需配置年限换算规则。
+      </div>
+      <div className="rounded-md border border-slate-200 bg-white p-3 text-xs leading-5 text-slate-600">
+        审核群命令：#毕业通过 &lt;编号&gt; / #毕业拒绝 &lt;理由&gt; &lt;编号&gt;；网页端在「服务页 → 毕业生去向 → 待审核」处理。
+      </div>
+    </div>
+  );
+}
+
 const BOT_MESSAGE_TYPES: Array<{ type: string; label: string; description: string }> = [
   { type: "submissionSuccess", label: "投稿成功", description: "用户私聊投稿完成后，机器人反馈的语句。支持 {id} 占位符。" },
   { type: "reviewApproved", label: "审核通过", description: "稿件通过审核后发送给作者的语句。支持 {id}。" },
@@ -985,7 +1246,167 @@ const PLUGINS: PluginDescriptor[] = [
     setEnabled: (config, value) => ({ ...config, aggregateLogin: { ...config.aggregateLogin, enabled: value } }),
     render: (config, onChange, busy) => <AggregateLoginPanel config={config} onChange={onChange} busy={busy} />,
   },
+  {
+    id: "broadcast",
+    icon: BroadcastIcon,
+    name: "广播通知",
+    tagline: "Broadcast",
+    description: "投稿页发起有时效的广播通知，广播员可标记已广播",
+    detailedDescription:
+      "本插件在投稿页顶部新增「广播通知」胶囊，让任意用户发起一条有明确时效的校园广播；广播员（或审核员、管理员）在服务页手动登记已广播，并把广播次数记上。\n\n" +
+      "发起流程：\n" +
+      "· 在投稿页顶部胶囊中切换到「广播通知」，填写通知内容与时效结束时间。\n" +
+      "· 时效结束时间最短晚于当前时间 5 分钟，最长 7 天；未选择或超限会提示且不提交。\n" +
+      "· 草稿按校园墙隔离自动保存到浏览器本地（localStorage），刷新后可继续编辑。\n" +
+      "· 点击「发布通知」即生效，无需审核，立即出现在服务页的广播通知列表。\n\n" +
+      "服务页 → 广播通知：\n" +
+      "· 两个胶囊：新通知（尚未过时效）与历史通知（已过期），历史通知支持搜索。\n" +
+      "· 新通知按三色排序：未通知（红）→ 已修改（橙）→ 已通知（绿），同色组内按结束时间近的排前。\n" +
+      "· 历史通知按发出时间从新到旧。\n" +
+      "· 通知卡片展示：通知者头像、通知内容、发出时间、结束时间、广播次数。\n\n" +
+      "角色与操作：\n" +
+      "· 「已广播」：广播员、审核员、管理员可点，弹窗确认后广播次数 +1；未通知的卡片显示「未通知」。\n" +
+      "· 「违规删除」：广播员、审核员、管理员可点，需二次确认，删除后通知永久移除。\n" +
+      "· 修改：只有通知发出者本人可在时效结束前修改内容与时效结束时间；修改后卡片变橙色，并追加一条历史版本。\n" +
+      "· 历史版本：可查看每一版的发出/修改时间、结束时间与当版广播次数。\n\n" +
+      "身份设置：\n" +
+      "· 广播员是独立于审核员/管理员之外的新身份，不拥有稿件审核能力。\n" +
+      "· 管理员在「管理 → 用户管理」中把用户身份改为「广播员」。",
+    author: DEFAULT_PLUGIN_AUTHOR,
+    hint: "新增身份组「广播员」，用于标记已广播与违规删除。",
+    accent: "from-orange-500 to-rose-500",
+    bgTint: "bg-orange-50 text-orange-700",
+    role: "admin",
+    required: ["config:read", "db:read", "db:write", "tenant:data", "user:data"],
+    riskLevel: "medium",
+    rationale: "开启后投稿页与服务页新增广播入口；通知内容、广播计数与作者头像均接入租户与用户数据。",
+    enabled: (config) => config.broadcast.enabled,
+    setEnabled: (config, value) => ({ ...config, broadcast: { ...config.broadcast, enabled: value } }),
+    render: (config, onChange, busy) => <BroadcastPanel config={config} onChange={onChange} busy={busy} />,
+  },
+  {
+    id: "feedback" as const,
+    icon: FeedbackIcon,
+    name: "意见反馈",
+    tagline: "Feedback",
+    description: "投稿页顶部意见反馈入口，提交后通知审核群",
+    detailedDescription: "开启后投稿页最上方出现意见反馈入口。意见先保存到站点，墙号在线且已开启审核群通知时同步到审核群。通知失败时意见仍已保存。",
+    author: "haohaoxuedili",
+    hint: "开启即可用；通知发到审核群。",
+    accent: "from-sky-500 to-cyan-500",
+    bgTint: "bg-sky-50 text-sky-700",
+    role: "admin" as const,
+    required: ["config:read", "db:read", "db:write", "tenant:data", "user:data"],
+    riskLevel: "medium" as const,
+    rationale: "开启后用户可提交文字意见并通知审核群。",
+    enabled: (config: TenantPluginConfig) => config.feedback.enabled,
+    setEnabled: (config: TenantPluginConfig, value: boolean) => ({ ...config, feedback: { ...config.feedback, enabled: value } }),
+    render: () => <FeedbackPanel />,
+  },
+  {
+    id: "botAlert" as const,
+    icon: BotAlertIcon,
+    name: "Bot 异常通知",
+    tagline: "Alert",
+    description: "登录态失效自动刷新失败时，邮件通知管理员",
+    detailedDescription: "开启后，当 QZone 登录态失效且自动刷新失败时，向配置的邮箱发送异常通知。管理员可配置 SMTP 服务器、端口、发件邮箱、密码，以及多个收件邮箱。",
+    author: "haohaoxuedili",
+    hint: "配置 SMTP 后开启即可用。",
+    accent: "from-rose-500 to-orange-500",
+    bgTint: "bg-rose-50 text-rose-700",
+    role: "admin" as const,
+    required: ["config:read", "db:read", "db:write", "tenant:data"],
+    riskLevel: "medium" as const,
+    rationale: "开启后登录态失效自动刷新失败时邮件通知管理员；需读写插件配置与租户数据。",
+    enabled: (config: TenantPluginConfig) => config.botAlert.enabled,
+    setEnabled: (config: TenantPluginConfig, value: boolean) => ({ ...config, botAlert: { ...config.botAlert, enabled: value } }),
+    render: (config: TenantPluginConfig, onChange: (next: TenantPluginConfig) => void, busy: boolean) => (
+      <BotAlertPanel config={config} onChange={onChange} busy={busy} />
+    ),
+  },
+  {
+    id: "graduation",
+    icon: GraduationIcon,
+    name: "毕业去向",
+    tagline: "Graduation",
+    description: "投稿页自填级/届与学历，审核通过后进入服务页四视图统计",
+    detailedDescription:
+      "本插件让毕业生在投稿页提交自己的毕业信息：入学年份（级）、毕业年份（届）、毕业时学历（如读高中毕业就是高中学历）、毕业去向（学校/单位全称）；提交后进入审核队列，审核员在审核群或网页端手动通过/驳回。\n\n" +
+      "投稿页：\n" +
+      "· 顶部胶囊新增「毕业去向」选项，选择后展示表单。\n" +
+      "· 入学年份（级）与毕业年份（届）均由投稿人自行填写，不做任何自动换算；毕业年份早于入学年份时不允许提交。\n" +
+      "· 毕业时学历自由填写（提供初中/高中/大专/本科等常用项快捷填入），如中专、职高、专升本也可直接输入。\n" +
+      "· 每个用户在同一校园墙内仅允许一份「待审核 + 已通过」的记录（驳回后可重新提交）。\n\n" +
+      "审核流程：\n" +
+      "· 提交后自动推送审核群，包含届/级、学历、去向与作者名。\n" +
+      "· 审核群命令：#毕业通过 <编号> / #毕业拒绝 <理由> <编号>。\n" +
+      "· 网页端在「服务页 → 毕业生去向 → 待审核」展示「通过」与「驳回」两个按钮，驳回需填写理由。\n\n" +
+      "服务页 → 毕业生去向：\n" +
+      "· 用户列表：头像 + 姓名 + QQ，点击展开详情（入学年/毕业年/学历/去向）；顶部显示已填写人数。\n" +
+      "· 学校列表：聚合展示每个学校的人数，点击展开具体人员。\n" +
+      "· 时间视图：可按届/级/提交时间排序，可升/降序，可筛选指定年份。\n" +
+      "· 搜索：支持 QQ 号 / 用户名 / 学校名关键词模糊匹配。\n\n" +
+      "管理：\n" +
+      "· 插件仅有开关，无需配置年限换算规则；级与届都由投稿人自己填。\n" +
+      "· 插件禁用后，投稿页胶囊与服务页入口同时隐藏；已有数据不受影响。",
+    author: DEFAULT_PLUGIN_AUTHOR,
+    hint: "级与届均由投稿人自填；审核群命令与网页审核双通道。",
+    accent: "from-violet-500 to-pink-500",
+    bgTint: "bg-violet-50 text-violet-700",
+    role: "admin",
+    required: ["config:read", "db:read", "db:write", "tenant:data", "user:data"],
+    riskLevel: "medium",
+    rationale: "开启后投稿页与服务页新增毕业去向入口；毕业信息（届/级/学历/去向）与作者 QQ 关联，仅供审核员统计查阅。",
+    enabled: (config) => config.graduation.enabled,
+    setEnabled: (config, value) => ({ ...config, graduation: { ...config.graduation, enabled: value } }),
+    render: (config, onChange, busy) => <GraduationPanel config={config} onChange={onChange} busy={busy} />,
+  },
+  {
+    id: "todayInHistory",
+    icon: TodayInHistoryIcon,
+    name: "那年今日",
+    tagline: "History",
+    description: "投稿页胶囊展示历史上同一月同一日的已发布稿件，按年份倒序分组",
+    detailedDescription:
+      "本插件在投稿页顶部新增「那年今日」胶囊，点击后展示本校园墙历史上同一月同一日发布过的稿件，按年份从近到远分组，每个年份以大字标出。\n\n" +
+      "投稿页：\n" +
+      "· 顶部胶囊新增「那年今日」选项，选择后展示历史稿件列表。\n" +
+      "· 年份倒序排列：先显示最近一年同日的稿件，再往前一年，直到没有更多数据。\n" +
+      "· 支持批量发布稿件与独立发布稿件，图片与文字同时展示。\n\n" +
+      "数据口径：\n" +
+      "· 仅统计已发布状态且属于当前校园墙的稿件。\n" +
+      "· 日期按校园墙所在时区（Asia/Shanghai）的日历日判定；稿件发布时刻取稿件最近一次更新时间或批次冲洗时间。\n\n" +
+      "管理：\n" +
+      "· 插件仅有开关，无需配置其他项；禁用后投稿页胶囊隐藏，已有数据不受影响。",
+    author: DEFAULT_PLUGIN_AUTHOR,
+    hint: "仅读取已发布稿件，无写入操作。",
+    accent: "from-rose-500 to-amber-500",
+    bgTint: "bg-rose-50 text-rose-700",
+    role: "admin",
+    required: ["config:read", "db:read", "tenant:data", "user:data"],
+    riskLevel: "low",
+    rationale: "开启后投稿页新增那年今日入口，仅读取已发布稿件并按年月日筛选，不写入任何数据。",
+    enabled: (config) => config.todayInHistory.enabled,
+    setEnabled: (config, value) => ({ ...config, todayInHistory: { ...config.todayInHistory, enabled: value } }),
+    render: (config, onChange, busy) => <TodayInHistoryPanel config={config} onChange={onChange} busy={busy} />,
+  },
 ];
+
+/**
+ * 插件展示元数据（图标 / 名称 / 简介 / 作者 / 配色）。
+ *
+ * 服务页的关于页需要在不进入管理端的情况下列出插件与作者，这里从配置页同一份
+ * PLUGINS 派生，避免两处各维护一份插件清单而漂移。
+ */
+export const PLUGIN_SHOWCASE = PLUGINS.map(({ id, icon, name, tagline, detailedDescription, author, hint }) => ({
+  id,
+  icon,
+  name,
+  tagline,
+  detailedDescription,
+  author,
+  hint,
+}));
 
 function ensureBotMessageDefaults(config: TenantPluginConfig): TenantPluginConfig {
   const existing = new Map(config.botStylishMessages.messageTypes.map((item) => [item.type, item]));
@@ -1052,6 +1473,28 @@ function buildInitialConfig(metadata: TenantMetadata): TenantPluginConfig {
       appKey: "",
       endpoint: "",
     },
+    broadcast: {
+      enabled: false,
+      quickPresets: [],
+    },
+    feedback: {
+      enabled: metadata.enableFeedback ?? false,
+    },
+    botAlert: {
+      enabled: metadata.enableBotAlert ?? false,
+      smtpHost: "",
+      smtpPort: 465,
+      smtpUser: "",
+      smtpPass: "",
+      fromEmail: "",
+      toEmails: [],
+    },
+    graduation: {
+      enabled: false,
+    },
+    todayInHistory: {
+      enabled: false,
+    },
   };
 }
 
@@ -1080,6 +1523,8 @@ export function PluginConfigPage({ tenantId, metadata, onSaved }: { tenantId: st
   const [config, setConfig] = useState<TenantPluginConfig>(() => ensureFontSelectionDefaults(ensureBotMessageDefaults(buildInitialConfig(metadata))));
   const [activeId, setActiveId] = useState<PluginId>("markdownRender");
   const [activeTab, setActiveTab] = useState<"config" | "info" | "log">("config");
+  const [broadcasterMigration, setBroadcasterMigration] = useState<Array<{ member: AdminMember; nextRole: TenantRole }> | null>(null);
+  const [migrationBusy, setMigrationBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   // 预设插件启用集合：来自 /api/admin/plugins 的 registry status。
@@ -1093,6 +1538,9 @@ export function PluginConfigPage({ tenantId, metadata, onSaved }: { tenantId: st
   const [auditLog, setAuditLog] = useState<Array<{ id: string; timestamp: string; action: string; pluginName: string; operator: string | null; detail: string | null; metadata: Record<string, unknown> | null }>>([]);
   const [auditLogLoading, setAuditLogLoading] = useState(false);
   const [logScope, setLogScope] = useState<"all" | "current">("current");
+  // 最近一次已保存/已加载的 botAlert 配置快照（JSON）：save() 用它判断 botAlert
+  // 是否有未测试的修改 —— 无论当前在哪个插件面板，整份 config 是一次性 PATCH 的。
+  const savedBotAlertRef = useRef<string | null>(null);
 
 
   useEffect(() => {
@@ -1110,7 +1558,9 @@ export function PluginConfigPage({ tenantId, metadata, onSaved }: { tenantId: st
     setLoading(true);
     try {
       const data = await api<{ config: TenantPluginConfig }>("/api/admin/plugins/settings");
-      setConfig(ensureFontSelectionDefaults(ensureBotMessageDefaults(data.config)));
+      const next = ensureFontSelectionDefaults(ensureBotMessageDefaults(data.config));
+      setConfig(next);
+      savedBotAlertRef.current = JSON.stringify(next.botAlert);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "读取插件配置失败");
     } finally {
@@ -1142,7 +1592,31 @@ export function PluginConfigPage({ tenantId, metadata, onSaved }: { tenantId: st
   async function save() {
     setBusy(true);
     try {
-      await api("/api/admin/plugins/settings", { method: "PATCH", body: JSON.stringify(config) });
+      // botAlert 专有门禁：只要有未测试过的 botAlert 修改（无论当前在哪个面板，
+      // 整份 config 是一次性 PATCH 的），保存前必须先通过测试邮件，避免静默
+      // 保存发不出去的 SMTP/收件配置（服务端只校验字段长度，不校验可达性）。
+      let configToSave = config;
+      const botAlertDirty =
+        savedBotAlertRef.current !== null && config.botAlert !== undefined && JSON.stringify(config.botAlert) !== savedBotAlertRef.current;
+      if (botAlertDirty) {
+        // 先丢弃没填完的空行，再拿清理后的收件列表做测试与保存。
+        configToSave = { ...config, botAlert: { ...config.botAlert, toEmails: config.botAlert.toEmails.map((s) => s.trim()).filter(Boolean) } };
+        const test = await api<{ ok: boolean; message: string }>("/api/admin/plugins/bot-alert/test", {
+          method: "POST",
+          body: JSON.stringify({
+            smtpHost: configToSave.botAlert.smtpHost,
+            smtpPort: configToSave.botAlert.smtpPort,
+            smtpUser: configToSave.botAlert.smtpUser,
+            smtpPass: configToSave.botAlert.smtpPass,
+            fromEmail: configToSave.botAlert.fromEmail,
+            toEmails: configToSave.botAlert.toEmails,
+          }),
+        });
+        toast.success(test.message || "测试邮件已发送");
+        setConfig(configToSave);
+      }
+      await api("/api/admin/plugins/settings", { method: "PATCH", body: JSON.stringify(configToSave) });
+      savedBotAlertRef.current = JSON.stringify(configToSave.botAlert);
       toast.success("插件配置已保存");
       await onSaved?.();
       // 保存可能触发插件启停变化，重新拉一次列表保持侧栏同步。
@@ -1167,29 +1641,63 @@ export function PluginConfigPage({ tenantId, metadata, onSaved }: { tenantId: st
     }
   }, [activeId]);
 
+  async function applyPluginStatus(registryName: string, nextStatus: "enabled" | "disabled") {
+    await api(`/api/admin/plugins/${encodeURIComponent(registryName)}/status`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: nextStatus }),
+    });
+    const nextSet = new Set(enabledPresetNames);
+    if (nextStatus === "disabled") nextSet.delete(registryName);
+    else nextSet.add(registryName);
+    setEnabledPresetNames(nextSet);
+    // 预设插件的启用状态也写入 plugin_config.<id>.enabled，重拉一次配置，
+    // 避免本地 config state 里的旧 enabled 在下次「保存」时把开启状态覆盖回禁用。
+    void loadConfig();
+    // 启停会改变插件透出的租户元数据（如 enableBroadcast），通知父级刷新，
+    // 否则管理页「用户」面板的角色选项不会立即跟随开关状态。
+    try { await onSaved?.(); } catch { /* 元数据刷新失败不影响插件启停 */ }
+    toast.success(nextStatus === "disabled" ? "已禁用插件" : "已启用插件");
+    void refreshAuditLog();
+  }
+
   async function togglePlugin(pluginId: PluginId) {
     const registryName = PRESET_NAME_BY_ID[pluginId];
     const isEnabled = enabledPresetNames.has(registryName);
     const nextStatus: "enabled" | "disabled" = isEnabled ? "disabled" : "enabled";
     setTogglingName(registryName);
     try {
-      await api(`/api/admin/plugins/${encodeURIComponent(registryName)}/status`, {
-        method: "PATCH",
-        body: JSON.stringify({ status: nextStatus }),
-      });
-      const nextSet = new Set(enabledPresetNames);
-      if (isEnabled) nextSet.delete(registryName);
-      else nextSet.add(registryName);
-      setEnabledPresetNames(nextSet);
-      // 预设插件的启用状态也写入 plugin_config.<id>.enabled，重拉一次配置，
-      // 避免本地 config state 里的旧 enabled 在下次「保存」时把开启状态覆盖回禁用。
-      void loadConfig();
-      toast.success(isEnabled ? "已禁用插件" : "已启用插件");
-      void refreshAuditLog();
+      // 关闭广播通知前：若墙内仍有广播员，先弹窗逐人迁移身份；
+      // 未修改的广播员在确认后统一改为「用户」，再真正关闭插件。
+      if (pluginId === "broadcast" && nextStatus === "disabled") {
+        const data = await api<{ members: AdminMember[] }>("/api/admin/members?role=broadcaster&limit=50");
+        if (data.members.length > 0) {
+          setBroadcasterMigration(data.members.map((member) => ({ member, nextRole: "submitter" as const })));
+          return;
+        }
+      }
+      await applyPluginStatus(registryName, nextStatus);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "插件启停失败");
     } finally {
       setTogglingName(null);
+    }
+  }
+
+  async function confirmBroadcasterMigration() {
+    if (!broadcasterMigration) return;
+    setMigrationBusy(true);
+    try {
+      await Promise.all(
+        broadcasterMigration.map(({ member, nextRole }) =>
+          api(`/api/admin/members/${member.id}`, { method: "PATCH", body: JSON.stringify({ role: nextRole }) }),
+        ),
+      );
+      setBroadcasterMigration(null);
+      await applyPluginStatus(PRESET_NAME_BY_ID.broadcast, "disabled");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "广播员身份修改失败");
+    } finally {
+      setMigrationBusy(false);
     }
   }
 
@@ -1403,6 +1911,40 @@ export function PluginConfigPage({ tenantId, metadata, onSaved }: { tenantId: st
           )}
         </CardContent>
       </Card>
+      <Dialog open={broadcasterMigration !== null} onOpenChange={(open) => { if (!open && !migrationBusy) setBroadcasterMigration(null); }}>
+        <DialogContent className="max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>关闭广播通知前，请处理广播员身份</DialogTitle>
+            <DialogDescription>
+              当前有 {broadcasterMigration?.length ?? 0} 名广播员。可为每人选择新身份；保持默认不修改的广播员，确认后会改为「{roleLabels.submitter}」。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-2">
+            {broadcasterMigration?.map(({ member, nextRole }) => (
+              <div key={member.id} className="flex items-center justify-between gap-3 rounded-md border border-slate-200 p-2.5">
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-semibold text-slate-900">{member.user.displayName ?? member.user.qqUin}</p>
+                  <p className="text-xs text-slate-500">QQ {member.user.qqUin}</p>
+                </div>
+                <Select value={nextRole} onValueChange={(role) => setBroadcasterMigration((current) => current?.map((entry) => entry.member.id === member.id ? { ...entry, nextRole: role as TenantRole } : entry) ?? null)}>
+                  <SelectTrigger className="w-28 bg-white font-bold">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="submitter">{roleLabels.submitter}</SelectItem>
+                    <SelectItem value="reviewer">{roleLabels.reviewer}</SelectItem>
+                    <SelectItem value="admin">{roleLabels.admin}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            ))}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" disabled={migrationBusy} onClick={() => setBroadcasterMigration(null)}>取消</Button>
+            <Button disabled={migrationBusy} onClick={() => void confirmBroadcasterMigration()}>{migrationBusy ? "处理中…" : "确认并关闭插件"}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

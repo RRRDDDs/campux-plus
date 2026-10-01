@@ -26,9 +26,13 @@ import {
   XIcon,
 } from "lucide-react";
 import { toast } from "sonner";
+import type { GraduationItem } from "@/features/graduation/GraduationReview";
+import { GraduationCapIcon } from "lucide-react";
+import { GraduationPendingReview, GraduationRejectDialog, useGraduationReviewQueue } from "@/features/graduation/GraduationReview";
+import { TodayInHistoryPanel } from "./TodayInHistoryPanel";
 import { api } from "@/lib/api";
 import { renderMarkdown } from "@/lib/markdown";
-import type { AssignedPostTag, Pagination, PostItem, PostTag, PostsTab, PostTimelineEntry, PublishedFeedItem, ReviewPostItem, TenantRole } from "@/types/app";
+import type { AssignedPostTag, FeedbackItem, FeedbackMessageItem, Pagination, PostItem, PostTag, PostsTab, PostTimelineEntry, PublishedFeedItem, ReviewPostItem, TenantRole } from "@/types/app";
 import { canAccess, statusLabels } from "@/lib/app-model";
 import { readListPreferences, writeListPreferences } from "@/lib/list-preferences";
 import { hasAnyQueryParam, readQueryInt, readQueryParam, writeQueryParams } from "@/lib/url-query";
@@ -259,6 +263,9 @@ export function PostsPage({
   mineLoading,
   autoFollowOwnPosts,
   enableMarkdownRender,
+  enableFeedback,
+  enableGraduation,
+  enableTodayInHistory,
   onMinePageChange,
   onTabChange,
   onRefresh,
@@ -272,6 +279,9 @@ export function PostsPage({
   mineLoading: boolean;
   autoFollowOwnPosts: boolean;
   enableMarkdownRender?: boolean;
+  enableFeedback?: boolean;
+  enableGraduation?: boolean;
+  enableTodayInHistory?: boolean;
   onMinePageChange: (page: number) => void;
   onTabChange: (tab: PostsTab) => void;
   onRefresh: () => Promise<void>;
@@ -279,12 +289,16 @@ export function PostsPage({
 }) {
   const canReview = canAccess(currentRole, "reviewer");
   const isAdmin = canAccess(currentRole, "admin");
+  const showFeedbackTab = Boolean(enableFeedback);
+  const showHistoryTab = Boolean(enableTodayInHistory);
   const [pendingRecallPosts, setPendingRecallPosts] = useState<ReviewPostItem[]>([]);
   const [reviewPosts, setReviewPosts] = useState<ReviewPostItem[]>([]);
   const [reviewPagination, setReviewPagination] = useState<Pagination>(() => defaultPagination());
   const [reviewLoading, setReviewLoading] = useState(false);
   const [pendingRecallLoading, setPendingRecallLoading] = useState(false);
   const [reviewStatus, setReviewStatus] = useState<ReviewStatusFilter>(() => readReviewListPreferences(tenantId).status);
+  const graduationReview = useGraduationReviewQueue(Boolean(enableGraduation) && canReview);
+  const [graduationRejectTarget, setGraduationRejectTarget] = useState<GraduationItem | null>(null);
   const [reviewKeyword, setReviewKeyword] = useState(() => readReviewListPreferences(tenantId).keyword);
   const [reviewPage, setReviewPage] = useState(() => readQueryInt("review_page", 1, { min: 1 }));
   const [publishedItems, setPublishedItems] = useState<PublishedFeedItem[]>([]);
@@ -298,6 +312,14 @@ export function PostsPage({
   const [mineSearchPosts, setMineSearchPosts] = useState<PostItem[] | null>(null);
   const [mineSearchPagination, setMineSearchPagination] = useState<Pagination | null>(null);
   const [mineSearchLoading, setMineSearchLoading] = useState(false);
+  const [feedbackItems, setFeedbackItems] = useState<FeedbackItem[]>([]);
+  const [feedbackPagination, setFeedbackPagination] = useState<Pagination>(() => defaultPagination());
+  const [feedbackLoading, setFeedbackLoading] = useState(false);
+  const [feedbackPage, setFeedbackPage] = useState(1);
+  const [feedbackScope, setFeedbackScope] = useState<"all" | "mine">("mine");
+  const [feedbackNonce, setFeedbackNonce] = useState(0);
+  const [feedbackReplyDrafts, setFeedbackReplyDrafts] = useState<Record<string, string>>({});
+  const [feedbackReplyBusyId, setFeedbackReplyBusyId] = useState("");
   const [tagMaintenanceDays, setTagMaintenanceDays] = useState("14");
   const [tagMaintenanceBusy, setTagMaintenanceBusy] = useState(false);
   const [detailPostId, setDetailPostId] = useState(() => readQueryParam("post"));
@@ -344,10 +366,71 @@ export function PostsPage({
   }, [preview.url]);
 
   useEffect(() => {
-    if (!canReview && activeTab !== "mine" && activeTab !== "published") {
-      onTabChange("mine");
+    const allowed: PostsTab[] = ["mine", "published"];
+    if (canReview) allowed.push("review");
+    if (showFeedbackTab) allowed.push("feedback");
+    if (showHistoryTab) allowed.push("history");
+    if (!allowed.includes(activeTab)) {
+      onTabChange(canReview ? "review" : "mine");
     }
-  }, [activeTab, canReview, onTabChange]);
+  }, [activeTab, canReview, showFeedbackTab, showHistoryTab, onTabChange]);
+
+  useEffect(() => {
+    // Tenant switch invalidates any in-flight feedback list for the old wall.
+    setFeedbackPage(1);
+    setFeedbackItems([]);
+  }, [tenantId]);
+
+  useEffect(() => {
+    if (activeTab !== "feedback" || !showFeedbackTab) {
+      return;
+    }
+    let cancelled = false;
+    setFeedbackLoading(true);
+    api<{ items: FeedbackItem[]; pagination: Pagination; scope: "all" | "mine" }>(`/api/feedback?page=${feedbackPage}&limit=20`)
+      .then((data) => {
+        if (cancelled) return;
+        setFeedbackItems(data.items);
+        setFeedbackPagination(data.pagination);
+        setFeedbackScope(data.scope);
+      })
+      .catch((caught) => {
+        if (cancelled) return;
+        toast.error(caught instanceof Error ? caught.message : "无法读取意见列表");
+      })
+      .finally(() => {
+        if (!cancelled) setFeedbackLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, showFeedbackTab, feedbackPage, feedbackNonce, tenantId]);
+
+  async function submitFeedbackReply(feedbackId: string) {
+    const content = (feedbackReplyDrafts[feedbackId] ?? "").trim();
+    if (!content) {
+      toast.error("请输入回复内容");
+      return;
+    }
+    setFeedbackReplyBusyId(feedbackId);
+    try {
+      const result = await api<{ ok: boolean; role?: string; message?: string }>(`/api/feedback/${feedbackId}/reply`, {
+        method: "POST",
+        body: JSON.stringify({ content }),
+      });
+      if (result.message) {
+        toast.warning(result.message);
+      } else {
+        toast.success("已回复");
+      }
+      setFeedbackReplyDrafts((drafts) => ({ ...drafts, [feedbackId]: "" }));
+      setFeedbackNonce((n) => n + 1);
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "回复失败");
+    } finally {
+      setFeedbackReplyBusyId("");
+    }
+  }
 
   useEffect(() => {
     if (activeTab !== "review") {
@@ -525,6 +608,25 @@ export function PostsPage({
     } finally {
       setApproveAllBusy(false);
     }
+  }
+
+  async function approveGraduation(target: GraduationItem) {
+    try {
+      await api(`/api/graduations/${encodeURIComponent(target.id)}/approve`, { method: "POST" });
+      toast.success(`已通过毕业去向 #${target.displayId}`);
+      graduationReview.reload();
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "操作失败");
+    }
+  }
+
+  async function submitGraduationReject(target: GraduationItem, reason: string) {
+    await api(`/api/graduations/${encodeURIComponent(target.id)}/reject`, {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    });
+    toast.success(`已驳回毕业去向 #${target.displayId}`);
+    graduationReview.reload();
   }
 
   async function cancelPost(id: string) {
@@ -875,6 +977,16 @@ export function PostsPage({
             <TabsTrigger value="published" className={postTabsTriggerClassName}>
               已发布
             </TabsTrigger>
+            {showFeedbackTab ? (
+              <TabsTrigger value="feedback" className={postTabsTriggerClassName}>
+                意见
+              </TabsTrigger>
+            ) : null}
+            {showHistoryTab ? (
+              <TabsTrigger value="history" className={postTabsTriggerClassName}>
+                那年今日
+              </TabsTrigger>
+            ) : null}
           </TabsList>
           <div className="flex items-center gap-3">
             <label className="flex cursor-pointer items-center gap-2 text-xs font-bold text-slate-500" title="开启后，你的每条稿件发布成功时会自动关注其评论，新评论每 12 小时私信提醒你">
@@ -1011,6 +1123,106 @@ export function PostsPage({
             </>
           )}
         </TabsContent>
+        {showHistoryTab ? (
+          <TabsContent value="history" className="mt-3 min-h-0 flex-1 overflow-y-auto pb-24 pr-1 md:pb-6">
+            <TodayInHistoryPanel
+              renderItem={(item) => (
+                <PublishedFeedCard
+                  item={item}
+                  canViewIdentity={canReview}
+                  onImagePreview={(images, index, title) => openImagePreview(images, index, title)}
+                />
+              )}
+            />
+          </TabsContent>
+        ) : null}
+        {showFeedbackTab ? (
+          <TabsContent value="feedback" className="mt-3 min-h-0 flex-1 overflow-y-auto pb-24 pr-1 md:pb-6">
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <p className="text-xs font-semibold text-slate-500">
+                {feedbackScope === "all" ? "本墙全部意见" : "你提交的意见"}
+                {feedbackPagination.total > 0 ? ` · 共 ${feedbackPagination.total} 条` : ""}
+              </p>
+              <Button variant="outline" size="sm" disabled={feedbackLoading} onClick={() => setFeedbackNonce((n) => n + 1)}>
+                刷新
+              </Button>
+            </div>
+            {feedbackLoading && feedbackItems.length === 0 ? (
+              <LoadingBlock title="正在加载意见..." />
+            ) : feedbackItems.length === 0 ? (
+              <EmptyCard title="还没有意见反馈" />
+            ) : (
+              <>
+                <div className="space-y-3">
+                  {feedbackItems.map((item) => (
+                    <Card key={item.id} className="border-sky-200 bg-white shadow-none dark:border-sky-900 dark:bg-slate-900">
+                      <CardContent className="space-y-3 p-4">
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+                          <span className="font-semibold text-slate-700 dark:text-slate-200">
+                            {item.canViewIdentity || feedbackScope === "mine"
+                              ? `${item.author.displayName || "未设置昵称"} · QQ ${item.author.qqUin}`
+                              : "匿名用户"}
+                          </span>
+                          <span>{new Date(item.createdAt).toLocaleString("zh-CN")}</span>
+                        </div>
+                        <p className="whitespace-pre-wrap break-words text-sm leading-6 text-slate-900 dark:text-slate-100">
+                          {item.content}
+                        </p>
+                        {(() => {
+                          const thread = item.messages.slice(1);
+                          if (thread.length === 0) return null;
+                          return (
+                            <div className="space-y-2 rounded-md border border-slate-100 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-slate-950/40">
+                              {thread.map((message: FeedbackMessageItem) => (
+                                <div key={message.id} className="space-y-1">
+                                  <p className="text-[11px] font-semibold text-slate-500">
+                                    {message.role === "admin" ? "管理员" : "用户"}
+                                    {message.authorLabel ? ` · ${message.authorLabel}` : ""}
+                                    {" · "}
+                                    {new Date(message.createdAt).toLocaleString("zh-CN")}
+                                  </p>
+                                  <p className="whitespace-pre-wrap break-words text-sm leading-6 text-slate-800 dark:text-slate-100">
+                                    {message.content}
+                                  </p>
+                                </div>
+                              ))}
+                            </div>
+                          );
+                        })()}
+                        <div className="space-y-2">
+                          <Textarea
+                            value={feedbackReplyDrafts[item.id] ?? ""}
+                            maxLength={500}
+                            placeholder="回复这条意见…"
+                            className="min-h-16 resize-none"
+                            disabled={feedbackReplyBusyId === item.id}
+                            onChange={(event) =>
+                              setFeedbackReplyDrafts((drafts) => ({
+                                ...drafts,
+                                [item.id]: event.target.value,
+                              }))
+                            }
+                          />
+                          <div className="flex justify-end">
+                            <Button
+                              size="sm"
+                              disabled={feedbackReplyBusyId === item.id || !(feedbackReplyDrafts[item.id] ?? "").trim()}
+                              onClick={() => void submitFeedbackReply(item.id)}
+                            >
+                              {feedbackReplyBusyId === item.id ? <LoaderIcon className="mr-1 size-4 animate-spin" /> : null}
+                              回复
+                            </Button>
+                          </div>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  ))}
+                </div>
+                <PaginationControls pagination={feedbackPagination} busy={feedbackLoading} onPageChange={setFeedbackPage} />
+              </>
+            )}
+          </TabsContent>
+        ) : null}
         {canReview ? (
           <TabsContent value="review" className="mt-3 flex min-h-0 flex-1 flex-col">
             <div className="mb-2 flex md:hidden">
@@ -1073,6 +1285,24 @@ export function PostsPage({
               </div>
             ) : null}
             <div className="min-h-0 flex-1 overflow-y-auto pb-24 pr-1 md:pb-6">
+              {enableGraduation ? (
+                <section className="mb-6 rounded-xl border border-violet-200 bg-violet-50/40 p-4 dark:border-violet-500/30 dark:bg-violet-500/10">
+                  <div className="mb-3 flex items-center gap-2">
+                    <GraduationCapIcon className="size-4 text-violet-600 dark:text-violet-300" />
+                    <h3 className="text-sm font-bold text-violet-950 dark:text-violet-100">待审核毕业去向</h3>
+                    <span className="ml-auto text-xs font-medium text-violet-700 dark:text-violet-300">共 {graduationReview.items.length} 条</span>
+                  </div>
+                  {graduationReview.loading && graduationReview.items.length === 0 ? (
+                    <p className="py-6 text-center text-xs font-medium text-slate-500">正在加载待审核毕业去向…</p>
+                  ) : (
+                    <GraduationPendingReview
+                      items={graduationReview.items}
+                      onApprove={(target) => void approveGraduation(target)}
+                      onReject={(target) => setGraduationRejectTarget(target)}
+                    />
+                  )}
+                </section>
+              ) : null}
               <PendingRecallQueue
                 posts={pendingRecallPosts}
                 loading={pendingRecallLoading}
@@ -1110,6 +1340,11 @@ export function PostsPage({
           </TabsContent>
         ) : null}
       </Tabs>
+                <GraduationRejectDialog
+                  target={graduationRejectTarget}
+                  onClose={() => setGraduationRejectTarget(null)}
+                  onSubmit={async (target, reason) => { await submitGraduationReject(target, reason); }}
+                />
       <Dialog open={preview.open} onOpenChange={(open) => setPreview((current) => ({ ...current, open }))}>
         <DialogContent className="w-[min(720px,calc(100vw-32px))]">
           <DialogHeader>

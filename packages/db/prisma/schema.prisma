@@ -16,6 +16,7 @@ enum TenantStatus {
 
 enum TenantRole {
   submitter
+  broadcaster
   reviewer
   admin
 }
@@ -64,6 +65,13 @@ enum CampaignStatus {
   taken_down
 }
 
+// 毕业去向状态：用户提交后待审核，通过则永久记录，驳回则不可见。
+enum UserGraduationStatus {
+  pending_approval
+  approved
+  rejected
+}
+
 model Tenant {
   id             String             @id @default(uuid())
   slug           String             @unique
@@ -73,6 +81,8 @@ model Tenant {
   themeColor     String             @default("#e0574f")
   nextPostDisplayId Int                @default(1)
   nextCampaignDisplayId Int            @default(1)
+  nextBroadcastDisplayId Int            @default(1)
+  nextGraduationDisplayId Int           @default(1)
   readyAt        DateTime?
   archiveWarningAt DateTime?
   createdAt      DateTime           @default(now())
@@ -85,6 +95,8 @@ model Tenant {
   oauthAccessTokens OAuthAccessToken[]
   posts          Post[]
   campaigns      Campaign[]
+  broadcasts     TenantBroadcast[]
+  graduations    UserGraduation[]
   postTags       PostTag[]
   botAccounts    BotAccount[]
   publishTargets PublishTarget[]
@@ -94,6 +106,7 @@ model Tenant {
   botFriendSnapshots BotFriendSnapshot[]
   publishBatches PublishBatch[]
   confessions    Confession[]
+  feedbacks      TenantFeedback[]
 }
 
 model User {
@@ -113,6 +126,9 @@ model User {
   memberships TenantMembership[]
   posts       Post[]
   campaigns   Campaign[]
+  broadcasts  TenantBroadcast[]
+  broadcastVersionChanges TenantBroadcastVersion[]
+  graduations UserGraduation[]
   sessions    AccountSession[]
   campaignVotes CampaignVote[]
   oauthAuthorizationCodes OAuthAuthorizationCode[]
@@ -124,6 +140,51 @@ model User {
   confessionsReceived Confession[] @relation("ConfessionTo")
   tenantApplications TenantApplication[] @relation("TenantApplicant")
   reviewedTenantApplications TenantApplication[] @relation("TenantApplicationReviewer")
+  feedbacks   TenantFeedback[]
+}
+
+// 广播通知：投稿页发起，有明确时效结束时间（最长 7 天）。
+// broadcastCount 由广播员（或审核员/管理员）点击「已广播」记账，每点一次 +1；
+// 被修改后内容变更，历史版本连同当时的广播次数落到 TenantBroadcastVersion。
+model TenantBroadcast {
+  id           String   @id @default(uuid())
+  tenantId     String
+  displayId    Int
+  authorId     String
+  content      String
+  endsAt       DateTime
+  broadcastCount Int    @default(0)
+  // 发出后作者改过内容即置为 modified：卡片显示橙色、排在未广播之后已广播之前。
+  modified     Boolean  @default(false)
+  removedAt    DateTime?
+  removedById  String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  author       User     @relation(fields: [authorId], references: [id], onDelete: Restrict)
+  versions     TenantBroadcastVersion[]
+
+  @@unique([tenantId, displayId])
+  @@index([tenantId, endsAt])
+  @@index([tenantId, authorId])
+}
+
+// 广播通知历史版本：每次「发布」或「修改」追加一条快照。
+model TenantBroadcastVersion {
+  id             String          @id @default(uuid())
+  broadcastId    String
+  version        Int
+  content        String
+  // 本次发出或修改的时间（首发等于广播的 createdAt）。
+  changedAt      DateTime        @default(now())
+  endsAt         DateTime
+  broadcastCount Int             @default(0)
+  changedById    String
+  broadcast      TenantBroadcast @relation(fields: [broadcastId], references: [id], onDelete: Cascade)
+  changedBy      User            @relation(fields: [changedById], references: [id])
+
+  @@unique([broadcastId, version])
+  @@index([broadcastId])
 }
 
 // 第三方聚合登录绑定：把第三方平台的社交 UID 关联到本地账号。
@@ -189,6 +250,36 @@ model TenantMembership {
 
   @@unique([tenantId, userId])
   @@index([userId])
+}
+
+// 毕业去向：投稿页填写入学年份（级）或毕业年份（届）之一（另一项由前端自动推算），
+// 加上毕业时学历（初中/高中/本科等）与毕业去向（学校全称或单位名称）。
+// 提交后进入审核队列，审核群与网页端均可「通过 / 驳回」；
+// 通过后计入服务页的毕业生去向统计视图（用户/学校/时间/搜索）。
+model UserGraduation {
+  id            String                @id @default(uuid())
+  tenantId      String
+  displayId     Int
+  authorId      String
+  graduationYear Int                  // 届（毕业年份）
+  classYear     Int                   // 级（入学年份）
+  education     String                // 初中 / 高中 / 本科 / 硕士 / 博士 / 其他…
+  destination   String                // 毕业去向（学校/单位全称，用户自填）
+  status        UserGraduationStatus  @default(pending_approval)
+  rejectReason  String?
+  reviewedById  String?
+  reviewedAt    DateTime?
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @updatedAt
+  tenant        Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  author        User                  @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, displayId])
+  @@index([tenantId, status])
+  @@index([tenantId, graduationYear])
+  @@index([tenantId, classYear])
+  @@index([tenantId, destination])
+  @@index([tenantId, authorId])
 }
 
 model TenantMetadata {
@@ -714,4 +805,36 @@ model TenantApplication {
 
   @@index([status, createdAt])
   @@index([userId, createdAt])
+}
+// 意见反馈：投稿页入口提交，存档供管理员/本人在稿件页查看。
+model TenantFeedback {
+  id             String   @id @default(uuid())
+  tenantId       String
+  authorId       String
+  content        String
+  groupMessageId String?
+  createdAt      DateTime @default(now())
+  tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  author         User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  messages       TenantFeedbackMessage[]
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, authorId, createdAt])
+  @@index([tenantId, groupMessageId])
+}
+
+// 意见对话消息：role=user 为投稿人，role=admin 为审核员/管理员回复。
+model TenantFeedbackMessage {
+  id          String         @id @default(uuid())
+  feedbackId  String
+  tenantId    String
+  role        String // user | admin
+  authorId    String?
+  authorLabel String?
+  content     String
+  createdAt   DateTime       @default(now())
+  feedback    TenantFeedback @relation(fields: [feedbackId], references: [id], onDelete: Cascade)
+
+  @@index([feedbackId, createdAt])
+  @@index([tenantId, createdAt])
 }

@@ -15,6 +15,7 @@ import {
   registerUserViaBot,
   requireBotTenantRole,
   reviewCampaignViaBot,
+  reviewGraduationViaBot,
   reviewPostViaBot,
   resetPasswordViaBot,
 } from "../lib/bot-workflows";
@@ -25,14 +26,14 @@ import { compressImageBuffer, deleteAttachmentObjects, uploadAttachmentBytes, ty
 import { findActiveBan, hasTenantRole } from "../lib/auth";
 import { buildCampuxLoginUrl } from "../lib/campux-login-url";
 import { prisma } from "../lib/prisma";
-import { extractOneBotImageSegments, extractOneBotMessageSegments, extractOneBotPlainText, isPrivatePostCancelText, isPrivatePostFinishText, isPrivatePostUndoText, parsePrivatePostConfirmText, parsePrivatePostModeText, parsePrivatePostStartText, type OneBotMessageSegment } from "../lib/private-posting";
+import { extractOneBotImageSegments, extractOneBotMessageSegments, extractOneBotPlainText, isPrivatePostCancelText, isPrivatePostFinishText, isPrivatePostUndoText, parsePrivatePostConfirmText, parsePrivatePostModeText, parsePrivatePostStartText, parsePostRecallOrCancelCommand, type OneBotMessageSegment } from "../lib/private-posting";
 import { analyzePrivatePostSemantics, type PrivatePostSemanticResult } from "../lib/private-posting-ai";
-import { readTenantImageCompression, readTenantPendingPostLimit, readTenantBotStylishMessagesEnabled, readTenantBotPrivatePostStylishEnabled } from "../lib/tenant-metadata";
+import { readTenantImageCompression, readTenantPendingPostLimit, readTenantBotPrivatePostStylishEnabled } from "../lib/tenant-metadata";
 import { readTenantPluginConfig } from "../lib/tenant-plugin-config";
 import { setBotCustomStylishMessages } from "../lib/bot-messages";
 import { isTenantRuntimeActive, tenantRuntimeRelationFilter } from "../lib/tenant-runtime";
 import { lockActiveTenantRuntime, runWithActiveTenantLease } from "../lib/tenant-runtime-lease";
-import { extractDisplayIdFromReviewText, isAllowedReplySender } from "./review-reply-resolve";
+import { extractDisplayIdFromReviewText, readQuotedReplyPayload, type QuotedReplyPayload } from "./review-reply-resolve";
 import {
   buildImageSourceSizeErrorMessage,
   imageStorageHardMaxBytes,
@@ -255,6 +256,10 @@ const reviewHelp = [
   "#撤回 [tid] （回复 #发布 成功消息可撤回刚发布的说说）",
   "#封禁 <QQ号> <理由> 或 ban <QQ号> <理由>",
   "#解封 <QQ号> 或 unban <QQ号>",
+  "#投票通过 <竞选编号>",
+  "#投票拒绝 <理由> <竞选编号>",
+  "#毕业通过 <毕业去向编号>",
+  "#毕业拒绝 <理由> <毕业去向编号>",
   "#好友数",
   "#登录 或 #刷新qzone cookies",
   "#扫码登录",
@@ -272,7 +277,6 @@ export class OneBotRuntime {
   private readonly interactionFence = new TenantInteractionGenerationFence();
   private readonly connections = new Set<OneBotConnection>();
   private readonly pendingActions = new Map<string, PendingAction>();
-  private readonly botStylishMessageCache = new Map<string, Record<string, string[]> | null>();
   private readonly privateAutoReplyAt = new Map<string, number>();
   private readonly privateForwardBuffers = new Map<string, PrivateForwardBuffer>();
   private readonly privatePostAggregateBuffers = new Map<string, PrivatePostAggregateBuffer>();
@@ -312,10 +316,11 @@ export class OneBotRuntime {
   /**
    * 读取 tenant 的插件配置，把 Bot 多彩消息类型对应的自定义语句表
    * 同步到 bot-messages 模块；消息类型未配置时自动回退到内置语句池。
-   * 同时返回“实际启用”标志（原开关 AND 插件配置里的 enabled）。
+   * 同时返回“实际启用”标志（即插件配置里的 enabled）。
    */
   private async resolveStylishEnabled(tenantId: string): Promise<boolean> {
-    const baseEnabled = await readTenantBotStylishMessagesEnabled(prisma, tenantId);
+    // 多彩消息唯一开关 = 插件配置里的 enabled（旧 TenantMetadata 开关已移除，
+    // 插件配置页是唯一管理入口）。
     try {
       const config = await readTenantPluginConfig(prisma, tenantId);
       const mapping: Record<string, string[]> = {};
@@ -324,12 +329,13 @@ export class OneBotRuntime {
           mapping[entry.type] = entry.messages;
         }
       }
-      this.botStylishMessageCache.set(tenantId, mapping);
       setBotCustomStylishMessages(mapping);
-      return baseEnabled && config.botStylishMessages.enabled;
+      // 并发注意：自定义语句表是模块级全局，resolve 完成后应紧接着同步调用
+      // format* 函数，中间不得插入 await，否则多租户并发时可能串用他人语句。
+      return config.botStylishMessages.enabled;
     } catch {
       setBotCustomStylishMessages(null);
-      return baseEnabled;
+      return false;
     }
   }
 
@@ -505,7 +511,7 @@ export class OneBotRuntime {
     if (!post) {
       return;
     }
-    const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, post.tenantId);
+    const stylishEnabled = await this.resolveStylishEnabled(post.tenantId);
     await this.sendTenantReviewNotification(post.tenantId, formatPostCancelled(post.displayId, stylishEnabled));
   }
 
@@ -531,7 +537,7 @@ export class OneBotRuntime {
     if (!post) {
       return;
     }
-    const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, post.tenantId);
+    const stylishEnabled = await this.resolveStylishEnabled(post.tenantId);
     const message = formatRecallRequestNotification(
       post.displayId,
       post.author.displayName ?? "未命名用户",
@@ -554,7 +560,7 @@ export class OneBotRuntime {
     if (!post) {
       return;
     }
-    const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, post.tenantId);
+    const stylishEnabled = await this.resolveStylishEnabled(post.tenantId);
     const groupSuffix = opts?.skipAuthor ? "\n（静默撤回，未通知作者）" : "";
     await this.sendTenantReviewNotification(post.tenantId, formatPostRecalledGroup(post.displayId, targetCount, stylishEnabled) + groupSuffix);
 
@@ -590,7 +596,7 @@ export class OneBotRuntime {
     if (!post) {
       return;
     }
-    const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, post.tenantId);
+    const stylishEnabled = await this.resolveStylishEnabled(post.tenantId);
     await this.sendTenantReviewNotification(post.tenantId, formatRecallRejectedNotification(post.displayId, reason, stylishEnabled));
 
     const bots = await prisma.botAccount.findMany({
@@ -619,7 +625,7 @@ export class OneBotRuntime {
       return;
     }
     const failed = results.filter((result) => !result.ok);
-    const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, post.tenantId);
+    const stylishEnabled = await this.resolveStylishEnabled(post.tenantId);
     const message = formatRecallFailedNotification(post.displayId, failed.map((r) => ({
       targetName: r.targetName,
       qzoneTid: r.qzoneTid,
@@ -650,7 +656,7 @@ export class OneBotRuntime {
         createdAt: "asc",
       },
     });
-    const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, post.tenantId);
+    const stylishEnabled = await this.resolveStylishEnabled(post.tenantId);
     const message = status === "approved"
       ? formatReviewApproved(post.displayId, stylishEnabled)
       : formatReviewRejected(post.displayId, comment?.trim() || "审核拒绝", stylishEnabled);
@@ -682,7 +688,7 @@ export class OneBotRuntime {
     if (!post) {
       return;
     }
-    const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, post.tenantId);
+    const stylishEnabled = await this.resolveStylishEnabled(post.tenantId);
     if (!target) {
       await this.sendTenantReviewNotification(post.tenantId, formatPublishSuccess(post.displayId, externalId, stylishEnabled));
       return;
@@ -710,7 +716,7 @@ export class OneBotRuntime {
     if (!post) {
       return;
     }
-    const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, post.tenantId);
+    const stylishEnabled = await this.resolveStylishEnabled(post.tenantId);
     const lines = [
       formatPublishFailed(post.displayId, !!options?.needsLogin, stylishEnabled),
       target ? `目标：${target.displayName}（${target.botAccount.displayName} / QQ ${target.botAccount.qqUin.toString()}）` : null,
@@ -745,7 +751,7 @@ export class OneBotRuntime {
     if (!post) {
       return;
     }
-    const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, post.tenantId);
+    const stylishEnabled = await this.resolveStylishEnabled(post.tenantId);
     const lines = [
       formatPublishWaiting(post.displayId, stylishEnabled),
       target ? `目标：${target.displayName}（${target.botAccount.displayName} / QQ ${target.botAccount.qqUin.toString()}）` : null,
@@ -768,7 +774,7 @@ export class OneBotRuntime {
     if (!bot || !bot.reviewGroupId) {
       return;
     }
-    const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, bot.tenantId);
+    const stylishEnabled = await this.resolveStylishEnabled(bot.tenantId);
     await this.sendGroupMessage(
       bot.qqUin.toString(),
       bot.reviewGroupId,
@@ -839,7 +845,7 @@ export class OneBotRuntime {
       await this.resumeWaitingPublishAttemptsForBot(bot.id);
       return result;
     } catch (error) {
-      const errorMessage = toErrorMessage(error);
+      const errorMessage = error instanceof Error ? error.message : String(error);
       this.qzoneProtocolAutoRefreshFailures.set(bot.id, {
         failedAt: Date.now(),
         error: errorMessage,
@@ -857,7 +863,37 @@ export class OneBotRuntime {
           cooldownMs: qzoneProtocolAutoRefreshFailureCooldownMs,
         },
       });
+      // Bot 异常通知：登录态失效且自动刷新失败时邮件通知管理员
+      void this.sendBotAlertEmail(bot, reason, errorMessage).catch((dispatchError) => {
+        this.logger.warn({ error: dispatchError, botId: bot.id }, "failed to dispatch bot alert email");
+      });
       throw error;
+    }
+  }
+
+  private async sendBotAlertEmail(
+    bot: { id: string; tenantId: string; displayName: string | null; qqUin: bigint },
+    reason: string,
+    error: string,
+  ) {
+    const { readTenantPluginConfig } = await import("../lib/tenant-plugin-config");
+    const { sendBotAlertEmail: sendEmail, formatBotAlertEmail } = await import("../lib/bot-alert-email");
+    const pluginConfig = await readTenantPluginConfig(prisma, bot.tenantId);
+    const alertConfig = pluginConfig.botAlert;
+    if (!alertConfig.enabled || alertConfig.toEmails.length === 0) {
+      return;
+    }
+    const tenant = await prisma.tenant.findUnique({ where: { id: bot.tenantId }, select: { name: true } });
+    const email = formatBotAlertEmail({
+      tenantName: tenant?.name ?? "未知校园墙",
+      botName: bot.displayName || `QQ ${bot.qqUin}`,
+      botQqUin: bot.qqUin.toString(),
+      reason,
+      error,
+    });
+    const result = await sendEmail(alertConfig, email);
+    if (!result.ok) {
+      this.logger.warn({ error: result.error, botId: bot.id }, "failed to send bot alert email");
     }
   }
 
@@ -870,7 +906,7 @@ export class OneBotRuntime {
     if (!bot || !bot.reviewGroupId) {
       return;
     }
-    const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, bot.tenantId);
+    const stylishEnabled = await this.resolveStylishEnabled(bot.tenantId);
     await this.sendGroupMessage(
       bot.qqUin.toString(),
       bot.reviewGroupId,
@@ -951,18 +987,28 @@ export class OneBotRuntime {
   }
 
   async sendGroupMessage(botQqUin: string, groupId: string | bigint, message: unknown) {
-    await this.callAction(botQqUin, "send_group_msg", {
+    const data = await this.callAction(botQqUin, "send_group_msg", {
       group_id: Number(groupId),
       message,
     });
+    return this.extractMessageId(data);
   }
 
-  async sendTenantReviewNotification(tenantId: string, message: unknown) {
-    const bot = await this.findTenantReviewNotificationBot(tenantId);
-    if (!bot) {
-      return;
+  async sendTenantReviewNotification(tenantId: string, message: unknown): Promise<{ ok: boolean; messageId: string | null }> {
+    try {
+      const bot = await this.findTenantReviewNotificationBot(tenantId);
+      if (!bot) {
+        return { ok: false, messageId: null };
+      }
+      const messageId = await this.sendGroupMessage(bot.qqUin.toString(), bot.reviewGroupId!, message);
+      return { ok: true, messageId };
+    } catch (error) {
+      this.logger.warn(
+        { error, tenantId },
+        "failed to send tenant review notification",
+      );
+      return { ok: false, messageId: null };
     }
-    await this.sendBotReviewGroupMessage(bot, message, "failed to send tenant review notification");
   }
 
   private async findTenantReviewNotificationBot(tenantId: string) {
@@ -1339,7 +1385,7 @@ export class OneBotRuntime {
           const createdAccess = !result.alreadyHadTenantAccess;
           let noticeSent = false;
           if (createdAccess) {
-            const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, bot.tenantId);
+            const stylishEnabled = await this.resolveStylishEnabled(bot.tenantId);
             const message = formatFirstPrivateMessageRegistrationNotice(result, loginUrl, stylishEnabled);
             if (message) {
               await this.sendPrivateMessage(botQqUin, userQqUin, message);
@@ -1388,6 +1434,21 @@ export class OneBotRuntime {
           event,
           body: startBody,
           aiIntakeEnabled: privatePostAiEnabled,
+        });
+        return;
+      }
+
+      // 按编号取消/撤回已提交稿件（议题 #162）；AI 开启时同样生效
+      const recallCommand = parsePostRecallOrCancelCommand(plainText);
+      if (recallCommand) {
+        this.clearPrivatePostAggregateBuffer(this.getPrivatePostDraftKey(botQqUin, userQqUin));
+        await this.handlePrivatePostRecallOrCancel({
+          bot,
+          botQqUin,
+          userQqUin,
+          action: recallCommand.action,
+          displayId: recallCommand.displayId,
+          reason: recallCommand.reason,
         });
         return;
       }
@@ -1651,7 +1712,7 @@ export class OneBotRuntime {
 
         // 保留原有自动回复
         if (!registrationGuidanceHandled && this.shouldSendPrivateAutoReply(bot.id, userQqUin, bot.userMessageReplyCooldownSeconds)) {
-          const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, bot.tenantId);
+          const stylishEnabled = await this.resolveStylishEnabled(bot.tenantId);
           await this.sendPrivateMessage(botQqUin, userQqUin, bot.userMessageReply || formatPrivateHelp(stylishEnabled)).catch(() => undefined);
         }
         return;
@@ -1661,7 +1722,7 @@ export class OneBotRuntime {
         if (registrationGuidanceHandled) {
           return;
         }
-        const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, bot.tenantId);
+        const stylishEnabled = await this.resolveStylishEnabled(bot.tenantId);
         await this.sendPrivateMessage(botQqUin, userQqUin, formatRegisterAlready(loginUrl, stylishEnabled));
         return;
       }
@@ -1676,7 +1737,7 @@ export class OneBotRuntime {
         if (!reset.shouldAnnounce) {
           return;
         }
-        const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, bot.tenantId);
+        const stylishEnabled = await this.resolveStylishEnabled(bot.tenantId);
         await this.sendPrivateMessage(botQqUin, userQqUin, formatResetPassword(reset.result.password, stylishEnabled));
         return;
       }
@@ -1684,9 +1745,10 @@ export class OneBotRuntime {
       if (registrationGuidanceHandled) {
         return;
       }
-      const generalStylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, bot.tenantId);
+      const generalStylishEnabled = await this.resolveStylishEnabled(bot.tenantId);
       await this.sendPrivateMessage(botQqUin, userQqUin, bot.userMessageReply || formatPrivateHelp(generalStylishEnabled));
     } catch (error) {
+      this.logger.warn({ error }, "private message handler failed");
       await this.sendPrivateMessage(botQqUin, userQqUin, toErrorMessage(error)).catch(() => undefined);
     }
   }
@@ -1743,6 +1805,149 @@ export class OneBotRuntime {
       return;
     }
     await this.sendPrivateMessage(botQqUin, userQqUin, formatConfessionAccepted(result.remainingToday));
+  }
+
+  private async handlePrivatePostRecallOrCancel({
+    bot,
+    botQqUin,
+    userQqUin,
+    action,
+    displayId,
+    reason,
+  }: {
+    bot: { id: string; tenantId: string; qqUin: bigint; displayName?: string | null };
+    botQqUin: string;
+    userQqUin: string;
+    action: "cancel" | "recall";
+    displayId: number;
+    reason: string;
+  }) {
+    try {
+      // 与其它私聊投稿操作一致：校验本墙成员、submitter 角色与封禁状态
+      const { operator: user } = await this.ensurePrivatePostingAllowed(bot.tenantId, userQqUin);
+      const post = await prisma.post.findFirst({
+        where: { tenantId: bot.tenantId, displayId, authorId: user.id },
+      });
+      if (!post) {
+        await this.sendPrivateMessage(botQqUin, userQqUin, `未找到你名下的稿件 #${displayId}。`);
+        return;
+      }
+
+      if (action === "cancel") {
+        if (post.status !== "pending_approval") {
+          await this.sendPrivateMessage(botQqUin, userQqUin, `稿件 #${displayId} 当前不是待审核状态，无法取消。`);
+          return;
+        }
+        const result = await runWithActiveTenantLease(prisma, bot.tenantId, async (transaction) => {
+          // 事务内按期望状态条件更新，避免与审核/发布并发时覆盖状态
+          const updated = await transaction.post.updateMany({
+            where: { id: post.id, status: "pending_approval" },
+            data: { status: "cancelled" },
+          });
+          if (updated.count > 0) {
+            await transaction.postLog.create({
+              data: {
+                tenantId: bot.tenantId,
+                postId: post.id,
+                actorId: user.id,
+                oldStatus: "pending_approval",
+                newStatus: "cancelled",
+                comment: reason ? `用户取消：${clampReason(reason)}` : "用户取消",
+              },
+            });
+          }
+          return { id: post.id, count: updated.count };
+        });
+        if (!result.active) throw new BotWorkflowError("校园墙已暂停或归档", 409);
+        if (result.value.count === 0) {
+          await this.sendPrivateMessage(botQqUin, userQqUin, `稿件 #${displayId} 状态已变化，取消未生效。`);
+          return;
+        }
+        this.notifyPostCancelled(result.value.id).catch((error) => {
+          this.logger.warn({ error, displayId }, "notify post cancelled failed");
+        });
+        await this.sendPrivateMessage(botQqUin, userQqUin, `稿件 #${displayId} 已取消。`);
+        return;
+      }
+
+      // recall
+      if (post.status === "pending_recall") {
+        await this.sendPrivateMessage(botQqUin, userQqUin, `稿件 #${displayId} 已在撤回审核中。`);
+        return;
+      }
+      if (post.status !== "published") {
+        await this.sendPrivateMessage(botQqUin, userQqUin, `稿件 #${displayId} 当前不是已发布状态，无法申请撤回。`);
+        return;
+      }
+      const batchItem = await prisma.publishBatchItem.findUnique({ where: { postId: post.id }, select: { id: true } });
+      if (batchItem) {
+        await this.sendPrivateMessage(botQqUin, userQqUin, `稿件 #${displayId} 为批量发布，暂不支持程序撤回，请联系管理员。`);
+        return;
+      }
+      const recallReason = reason ? clampReason(reason) : "对话指令申请";
+      const result = await runWithActiveTenantLease(prisma, bot.tenantId, async (transaction) => {
+        // 事务内按期望状态条件更新，避免与审核/撤回流程并发时覆盖状态
+        const updated = await transaction.post.updateMany({
+          where: { id: post.id, status: "published" },
+          data: {
+            status: "pending_recall",
+            recallIgnored: false,
+            recallIgnoredAt: null,
+          },
+        });
+        if (updated.count > 0) {
+          await transaction.postLog.create({
+            data: {
+              tenantId: bot.tenantId,
+              postId: post.id,
+              actorId: user.id,
+              oldStatus: "published",
+              newStatus: "pending_recall",
+              comment: `用户申请撤回：${recallReason}`,
+            },
+          });
+          // 审计与状态变更同事务提交，避免已改状态却缺 post.recall.request 记录
+          await writeAuditLog({
+            tenantId: bot.tenantId,
+            actorId: user.id,
+            action: "post.recall.request",
+            targetType: "post",
+            targetId: post.id,
+            detail: {
+              displayId: post.displayId,
+              reason: recallReason,
+            },
+          }, transaction);
+        }
+        return { id: post.id, count: updated.count };
+      });
+      if (!result.active) throw new BotWorkflowError("校园墙已暂停或归档", 409);
+      if (result.value.count === 0) {
+        await this.sendPrivateMessage(botQqUin, userQqUin, `稿件 #${displayId} 状态已变化，撤回未生效。`);
+        return;
+      }
+      // 已提交：通知/回执/插件副作用失败不得再向用户报“撤回失败”
+      this.notifyPostRecallRequested(result.value.id).catch((error) => {
+        this.logger.warn({ error, displayId }, "notify post recall requested failed");
+      });
+      await this.sendPrivateMessage(botQqUin, userQqUin, `稿件 #${displayId} 撤回申请已提交，等待审核。`).catch((error) => {
+        this.logger.warn({ error, displayId }, "recall success message failed after commit");
+      });
+      try {
+        this.pluginEvents?.emit({
+          type: "post:recalled",
+          tenantId: bot.tenantId,
+          postId: post.id,
+        });
+      } catch (error) {
+        this.logger.warn({ error, displayId }, "post:recalled plugin emit failed");
+      }
+      return;
+    } catch (error) {
+      // 只把 BotWorkflowError 的业务文案发给用户，其它错误走通用文案并记日志
+      this.logger.warn({ error, displayId, action }, "private post recall/cancel failed");
+      await this.sendPrivateMessage(botQqUin, userQqUin, toErrorMessage(error)).catch(() => undefined);
+    }
   }
 
   private async resolveCampuxLoginUrl(tenantId: string) {
@@ -1873,6 +2078,7 @@ export class OneBotRuntime {
       try {
         staged = await this.stagePrivatePostAttachments(bot, event, permit);
       } catch (error) {
+        this.logger.warn({ error }, "stage private post attachments failed");
         await this.sendPrivateMessage(botQqUin, userQqUin, toErrorMessage(error)).catch(() => undefined);
         return false;
       }
@@ -2019,7 +2225,7 @@ export class OneBotRuntime {
 
     const { post } = result;
     this.privatePostPendingConfirms.delete(draftKey);
-    const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, bot.tenantId);
+    const stylishEnabled = await this.resolveStylishEnabled(bot.tenantId);
     await this.sendPrivateMessage(botQqUin, userQqUin, formatSubmissionSuccess(post.displayId, stylishEnabled));
   }
 
@@ -2346,7 +2552,7 @@ export class OneBotRuntime {
     const draftKey = this.getPrivatePostDraftKey(botQqUin, userQqUin);
     const pending = this.privatePostPendingModes.get(draftKey);
     if (pending) {
-      const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, bot.tenantId);
+      const stylishEnabled = await this.resolveStylishEnabled(bot.tenantId);
       const privateStylishEnabled = await readTenantBotPrivatePostStylishEnabled(prisma, bot.tenantId);
       const undone = await this.popPrivatePostHistoryEntry(draftKey, pending, stylishEnabled);
       if (!undone) {
@@ -2359,7 +2565,7 @@ export class OneBotRuntime {
 
     const pendingConfirm = this.privatePostPendingConfirms.get(draftKey);
     if (pendingConfirm) {
-      const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, bot.tenantId);
+      const stylishEnabled = await this.resolveStylishEnabled(bot.tenantId);
       await this.popPrivatePostHistoryEntry(draftKey, pendingConfirm, stylishEnabled);
       await this.sendPrivateMessage(botQqUin, userQqUin, formatPrivatePostConfirmPrompt(pendingConfirm.text, pendingConfirm.attachments.length, pendingConfirm.aiIntakeEnabled));
       return;
@@ -2371,7 +2577,7 @@ export class OneBotRuntime {
       return;
     }
 
-    const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, bot.tenantId);
+    const stylishEnabled = await this.resolveStylishEnabled(bot.tenantId);
     const privateStylishEnabled = await readTenantBotPrivatePostStylishEnabled(prisma, bot.tenantId);
     const undone = await this.popPrivatePostHistoryEntry(draftKey, draft, stylishEnabled);
     if (!undone) {
@@ -2532,7 +2738,7 @@ export class OneBotRuntime {
               },
             });
           },
-          { isolationLevel: TransactionIsolationLevel.Serializable },
+          { isolationLevel: TransactionIsolationLevel.Serializable, maxWait: 15_000, timeout: 60_000 },
         );
         break;
       } catch (error) {
@@ -2647,6 +2853,46 @@ export class OneBotRuntime {
     }
   }
 
+  // 毕业去向相关通知：新记录进入审核队列、审核通过/驳回。
+  async notifyNewGraduation(graduationId: string) {
+    const record = await prisma.userGraduation.findUnique({
+      where: { id: graduationId },
+      include: { author: true },
+    });
+    if (!record) return;
+    const bots = await prisma.botAccount.findMany({
+      where: { tenantId: record.tenantId, enabled: true, reviewGroupId: { not: null } },
+      orderBy: { createdAt: "asc" },
+    });
+    const authorName = record.author.displayName ?? record.author.qqUin.toString();
+    // 用户可控字段先转义 CQ 码并压平换行，防止注入 [CQ:...] 段或伪造指令行。
+    const singleLine = (value: string) => escapeCqCode(value).replace(/\r?\n/g, " ");
+    const text = `毕业去向 #${record.displayId} 待审核：${singleLine(authorName)} 提交 ${record.graduationYear} 届（${record.classYear} 级）· ${singleLine(record.education)} · ${singleLine(record.destination)}。可用 #毕业通过 ${record.displayId} 或 #毕业拒绝 <理由> ${record.displayId} 处理。`;
+    for (const bot of bots) {
+      if (!bot.reviewGroupId) continue;
+      const status = this.getBotConnectionStatus(bot.qqUin.toString());
+      if (!status.online) continue;
+      try {
+        await this.sendGroupMessage(bot.qqUin.toString(), bot.reviewGroupId, text);
+      } catch (error) {
+        this.logger.warn({ botId: bot.id, error }, "failed to notify review group for graduation");
+      }
+    }
+    void this.sendPrivateMessageViaTenantBots(record.tenantId, record.author.qqUin, `你提交的毕业去向 #${record.displayId} 已进入审核队列。`);
+  }
+
+  async notifyGraduationReviewed(graduationId: string, status: "approved" | "rejected", reason?: string | null) {
+    const record = await prisma.userGraduation.findUnique({
+      where: { id: graduationId },
+      include: { author: true },
+    });
+    if (!record) return;
+    const message = status === "approved"
+      ? `你提交的毕业去向 #${record.displayId} 已通过审核。`
+      : (reason ? `你提交的毕业去向 #${record.displayId} 未通过审核。理由：${reason}` : `你提交的毕业去向 #${record.displayId} 未通过审核。`);
+    void this.sendPrivateMessageViaTenantBots(record.tenantId, record.author.qqUin, message);
+  }
+
   private async handleGroupMessage(event: OneBotMessageEvent) {
     const botQqUin = normalizeId(event.self_id);
     const groupId = normalizeId(event.group_id);
@@ -2660,11 +2906,26 @@ export class OneBotRuntime {
       return;
     }
 
-    let command = parseReviewGroupCommand(extractPlainText(event));
+    const plainText = extractPlainText(event);
+
+    // 引用消息预解析：用于多墙号去重路由与稿件编号解析（命令必须 @ 机器人才生效）。
+    const quoted = await this.fetchQuotedReplyMessage(event, botQqUin, plainText);
+    const quotedSenderId = quoted?.senderId ?? null;
+    const quotedBotRow = quotedSenderId && quotedSenderId !== botQqUin
+      ? await this.findBotAccountByQqUin(quotedSenderId).catch(() => null)
+      : null;
+    // 被引用消息来自本墙号自身或同租户墙号时，才作为多墙号被同时 @ 的去重路由依据；
+    // 跨租户墙号的消息不劫持当前租户的 @ 路由，避免 # 命令被错误租户的墙号执行。
+    const quotedBotSenderQqUin = quotedSenderId !== null && (quotedSenderId === botQqUin || quotedBotRow?.tenantId === bot.tenantId)
+      ? quotedSenderId
+      : null;
+
+    let command = parseReviewGroupCommand(plainText);
 
     // 如果没有以 # 或 / 明确给出命令，但消息是 @ 机器人的短命令（比如 过/拒），支持基于 mention 的快捷命令。
+    // 仅引用而不 @ 时指令不生效。
     if (!command && isMentioningBot(event, botQqUin)) {
-      command = parseReviewGroupShortCommand(extractPlainText(event));
+      command = parseReviewGroupShortCommand(plainText);
     }
 
 
@@ -2679,12 +2940,13 @@ export class OneBotRuntime {
       currentBotQqUin: botQqUin,
       mentionedBotQqUins: readMentionedQqUins(event),
       preferredBotId: await this.findTenantReviewNotificationBot(bot.tenantId).then((candidate) => candidate?.id ?? null),
+      quotedBotSenderQqUin,
     })) {
       return;
     }
 
     try {
-      const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, bot.tenantId);
+      const stylishEnabled = await this.resolveStylishEnabled(bot.tenantId);
 
       if (command.name === "全部通过") {
         const result = await approveAllPendingPostsViaBot({
@@ -2753,11 +3015,58 @@ export class OneBotRuntime {
         return;
       }
 
+      // 毕业去向审核：#毕业通过 <编号> / #毕业拒绝 <理由> <编号>
+      if (command.name === "毕业通过") {
+        const displayId = parseDisplayId(command.args);
+        if (!displayId) {
+          await this.sendGroupMessage(botQqUin, groupId, "用法：#毕业通过 <毕业去向编号>");
+          return;
+        }
+        const result = await reviewGraduationViaBot({
+          queue: this.queue,
+          botQqUin,
+          groupId,
+          operatorQqUin,
+          displayId,
+          action: "approve",
+        });
+        await this.sendGroupMessage(botQqUin, groupId, `毕业去向 #${result.graduation.displayId} 已通过`);
+        this.notifyGraduationReviewed(result.graduation.id, "approved").catch(() => undefined);
+        return;
+      }
+
+      if (command.name === "毕业拒绝") {
+        const args = command.args.trim();
+        const tailMatch = args.match(/^(.*?)\s+(\d+)\s*$/);
+        if (!tailMatch || !tailMatch[1] || !tailMatch[2]) {
+          await this.sendGroupMessage(botQqUin, groupId, "用法：#毕业拒绝 <理由> <毕业去向编号>");
+          return;
+        }
+        const comment = tailMatch[1].trim();
+        if (!comment) {
+          await this.sendGroupMessage(botQqUin, groupId, "拒绝必须填写理由");
+          return;
+        }
+        const displayId = Number(tailMatch[2]);
+        const result = await reviewGraduationViaBot({
+          queue: this.queue,
+          botQqUin,
+          groupId,
+          operatorQqUin,
+          displayId,
+          action: "reject",
+          comment,
+        });
+        await this.sendGroupMessage(botQqUin, groupId, `毕业去向 #${result.graduation.displayId} 已拒绝`);
+        this.notifyGraduationReviewed(result.graduation.id, "rejected", comment).catch(() => undefined);
+        return;
+      }
+
       if (command.name === "通过") {
         let displayId = parseDisplayId(command.args);
-        // 尝试从引用消息解析稿件编号：仅在操作员 mention 机器人且存在引用时才解析
+        // 尝试从引用消息解析稿件编号：仅在 @机器人 时解析，引用但不 @ 不生效
         if (!displayId && isMentioningBot(event, botQqUin)) {
-          displayId = await this.tryResolveDisplayIdFromReply(event, botQqUin);
+          displayId = await this.resolveDisplayIdFromQuotedReply(quoted, botQqUin, bot.tenantId);
         }
         if (!displayId) {
           await this.sendGroupMessage(botQqUin, groupId, [
@@ -2790,8 +3099,9 @@ export class OneBotRuntime {
             await this.sendGroupMessage(botQqUin, groupId, reviewHelp);
             return;
           }
+          // 引用解析编号仅在 @机器人 时尝试；引用但不 @ 不生效
           const displayIdFromReply = isMentioningBot(event, botQqUin)
-            ? await this.tryResolveDisplayIdFromReply(event, botQqUin)
+            ? await this.resolveDisplayIdFromQuotedReply(quoted, botQqUin, bot.tenantId)
             : null;
           if (!displayIdFromReply) {
             await this.sendGroupMessage(botQqUin, groupId, reviewHelp);
@@ -3100,6 +3410,7 @@ export class OneBotRuntime {
 
       await this.sendGroupMessage(botQqUin, groupId, reviewHelp);
     } catch (error) {
+      this.logger.warn({ error, botQqUin, groupId }, "review group command handler failed");
       await this.sendGroupMessage(botQqUin, groupId, toErrorMessage(error)).catch(() => undefined);
     }
   }
@@ -3290,7 +3601,7 @@ export class OneBotRuntime {
       }
     }
     if (this.shouldSendPrivateAutoReply(buffer.bot.id, buffer.userQqUin, buffer.bot.userMessageReplyCooldownSeconds)) {
-      const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, buffer.tenantId);
+      const stylishEnabled = await this.resolveStylishEnabled(buffer.tenantId);
       if (!this.interactionFence.isCurrent(permit)) {
         return;
       }
@@ -3461,7 +3772,14 @@ export class OneBotRuntime {
     });
   }
 
-  private async tryResolveDisplayIdFromReply(event: OneBotMessageEvent, botQqUin: string): Promise<number | null> {
+  /**
+   * 取回当前消息引用的被引用消息（get_msg）。
+   * 仅在存在 reply 段且消息文本非空时调用 get_msg；失败或无引用时返回 null。
+   */
+  private async fetchQuotedReplyMessage(event: OneBotMessageEvent, botQqUin: string, plainText: string): Promise<QuotedReplyPayload | null> {
+    if (!plainText.trim()) {
+      return null;
+    }
     try {
       // 只解析真正的 reply 段；不要回退到 event.message_id（那是当前消息，不是被引用的审核通知）。
       const replyId = this.extractReplyMessageId(event);
@@ -3471,39 +3789,49 @@ export class OneBotRuntime {
 
       const data = await this.callAction(botQqUin, "get_msg", { message_id: replyId }).catch(() => null);
       if (!data) return null;
-
-      // 仅当能明确识别发送者且不是本 bot 时才拒绝。
-      // 部分 OneBot 实现（NapCat 等）get_msg 可能不带 sender，此时仍尝试从正文解析编号。
-      const sender = (data as any).sender ?? (data as any).user ?? null;
-      const senderId = sender
-        ? normalizeId(sender.user_id ?? sender.userId ?? sender.uin ?? sender.qq ?? sender.id)
-        : null;
-      if (!isAllowedReplySender(senderId, botQqUin)) {
-        return null;
-      }
-
-      // data may contain `message` (array) or `raw_message` or `message` string
-      let text = "";
-      if (Array.isArray((data as any).message)) {
-        text = (data as any).message
-          .map((seg: any) => {
-            if (seg?.type === "text") return seg?.data?.text ?? "";
-            if (seg?.type === "reply" || seg?.type === "at") return "";
-            return typeof seg?.data?.text === "string" ? seg.data.text : "";
-          })
-          .join("");
-      } else if (typeof (data as any).message === "string") {
-        text = (data as any).message;
-      }
-      if (!text && typeof (data as any).raw_message === "string") {
-        text = (data as any).raw_message;
-      }
-
-      if (!text) return null;
-      return extractDisplayIdFromReviewText(text);
+      return readQuotedReplyPayload(data);
     } catch {
       return null;
     }
+  }
+
+  /**
+   * 从预取的被引用消息解析稿件编号。
+   * 仅接受发送者可识别且为本墙号或同租户其他墙号（如另一墙号发的审核通知）的消息；
+   * 发送者缺失或为普通用户时拒绝，防止伪造「编号：#x」诱导误审。
+   */
+  private async resolveDisplayIdFromQuotedReply(quoted: QuotedReplyPayload | null, botQqUin: string, tenantId: string): Promise<number | null> {
+    if (!quoted || !quoted.text) {
+      return null;
+    }
+    const senderId = quoted.senderId ?? null;
+    if (!senderId) {
+      return null;
+    }
+    if (senderId !== botQqUin) {
+      const row = await this.findBotAccountByQqUin(senderId).catch(() => null);
+      if (!row || row.tenantId !== tenantId) {
+        return null;
+      }
+    }
+    return extractDisplayIdFromReviewText(quoted.text);
+  }
+
+  /** 按 QQ 号查找已登记的墙号账号（任意租户，无论当前是否启用）。 */
+  private async findBotAccountByQqUin(qqUin: string): Promise<{ id: string; tenantId: string } | null> {
+    if (!qqUin) {
+      return null;
+    }
+    return prisma.botAccount.findFirst({
+      where: {
+        platform: "onebot",
+        qqUin: BigInt(qqUin),
+      },
+      select: {
+        id: true,
+        tenantId: true,
+      },
+    });
   }
 
   private async tryResolveQZoneTidFromReply(event: OneBotMessageEvent, botQqUin: string): Promise<string | null> {
@@ -3739,11 +4067,22 @@ export class OneBotRuntime {
   }
 
   private extractMessageId(data: unknown): string | null {
-    if (data && typeof data === "object") {
-      const d = data as Record<string, unknown>;
-      if (d.message_id !== undefined) {
-        return String(d.message_id);
+    if (!data || typeof data !== "object") {
+      return null;
+    }
+    const d = data as Record<string, unknown>;
+    if (d.message_id !== undefined && d.message_id !== null) {
+      return String(d.message_id);
+    }
+    if (d.data && typeof d.data === "object") {
+      // 嵌套里有可用 ID 才返回；否则继续走本层的 real_id 回退。
+      const nested = this.extractMessageId(d.data);
+      if (nested !== null) {
+        return nested;
       }
+    }
+    if (d.real_id !== undefined && d.real_id !== null) {
+      return String(d.real_id);
     }
     return null;
   }
@@ -3976,11 +4315,19 @@ export function shouldHandleReviewGroupCommandForBot(input: {
   currentBotQqUin: string;
   mentionedBotQqUins: string[];
   preferredBotId: string | null;
+  /** 被引用消息的发送者是本系统登记的墙号时，传入其 QQ 号；否则传 null */
+  quotedBotSenderQqUin?: string | null;
 }) {
   const mentioned = input.mentionedBotQqUins;
   if (mentioned.length > 0) {
+    // QQ 回复会自动 @ 被引用消息的发送者，叠加手动 @ 另一个墙号时会出现多个被 @ 的墙号；
+    // 此时只让被引用消息所属的墙号处理，避免重复回复与「未解析到稿件编号」误报。
+    if (input.quotedBotSenderQqUin && mentioned.includes(input.quotedBotSenderQqUin)) {
+      return input.quotedBotSenderQqUin === input.currentBotQqUin;
+    }
     return mentioned.includes(input.currentBotQqUin);
   }
+  // 未 @ 任何墙号时，默认由首选审核通知墙号应答（与「通知墙号」设置保持一致）。
   return input.preferredBotId === null || input.preferredBotId === input.currentBotId;
 }
 
@@ -4268,9 +4615,28 @@ function extractCookiesFromActionData(data: unknown) {
   throw new BotWorkflowError("协议端没有返回 cookies 数据", 502);
 }
 
+function clampReason(reason: string) {
+  // 与 Web API recallRequestSchema.max(500) 对齐，避免超长理由写入日志
+  return reason.length > 500 ? reason.slice(0, 500) : reason;
+}
+
 function toErrorMessage(error: unknown) {
-  if (error instanceof Error) {
+  if (error instanceof BotWorkflowError) {
     return error.message;
+  }
+  if (error instanceof Error) {
+    const message = error.message;
+    // Dependency/driver failures: same user-facing copy as unexpected errors.
+    if (
+      message.includes("Transaction API error")
+      || message.includes("expired transaction")
+      || message.includes("Invalid `prisma.")
+      || message.includes("Connection")
+    ) {
+      return "系统繁忙，请稍后再试";
+    }
+    // Unexpected Error: do not leak internals into QQ chats; callers should log.
+    return "系统繁忙，请稍后再试";
   }
   return "Bot 命令处理失败";
 }

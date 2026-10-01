@@ -19,8 +19,6 @@ import {
   imageCompressionQualityKey,
   imageCompressionMaxDimensionKey,
   imageMaxSizeMetadataKey,
-  botStylishMessagesEnabledKey,
-  normalizeBotStylishMessagesEnabled,
   botPrivatePostStylishEnabledKey,
   normalizeBotPrivatePostStylishEnabled,
   readTenantImageCompression,
@@ -43,6 +41,8 @@ import {
   normalizeEnableFontSelection,
   enableAnonymousAvatarSelectionKey,
   normalizeEnableAnonymousAvatarSelection,
+  followedPostCommentNotifyEnabledKey,
+  normalizeFollowedPostCommentNotifyEnabled,
 } from "../lib/tenant-metadata";
 import { maxImageMaxSizeMb, minImageMaxSizeMb, normalizeImageMaxSizeMb } from "../lib/image-upload-policy";
 
@@ -57,7 +57,6 @@ const publicMetadataKeys = [
   imageCompressionQualityKey,
   imageCompressionMaxDimensionKey,
   imageMaxSizeMetadataKey,
-  botStylishMessagesEnabledKey,
   botPrivatePostStylishEnabledKey,
   publishModeKey,
   publishAccumulateMinImagesKey,
@@ -68,6 +67,7 @@ const publicMetadataKeys = [
   enableMarkdownRenderKey,
   enableFontSelectionKey,
   enableAnonymousAvatarSelectionKey,
+  followedPostCommentNotifyEnabledKey,
 ] as const;
 
 const patchMetadataSchema = z.object({
@@ -90,7 +90,6 @@ const patchMetadataSchema = z.object({
   imageCompressionQuality: z.number().int().min(40).max(95).optional(),
   imageCompressionMaxDimension: z.number().int().min(512).max(4096).optional(),
   imageMaxSizeMb: z.number().int().min(minImageMaxSizeMb).max(maxImageMaxSizeMb).optional(),
-  botStylishMessagesEnabled: z.boolean().optional(),
   botPrivatePostStylishEnabled: z.boolean().optional(),
   publishMode: z.enum(["single", "accumulate"]).optional(),
   publishAccumulateMinImages: z.number().int().min(1).max(publishAccumulateImageHardMax).optional(),
@@ -101,6 +100,7 @@ const patchMetadataSchema = z.object({
   enableMarkdownRender: z.boolean().optional(),
   enableFontSelection: z.boolean().optional(),
   enableAnonymousAvatarSelection: z.boolean().optional(),
+  followedPostCommentNotifyEnabled: z.boolean().optional(),
 });
 
 function normalizeMetadata(entries: Array<{ key: string; value: unknown }>) {
@@ -129,7 +129,7 @@ function normalizeMetadata(entries: Array<{ key: string; value: unknown }>) {
       maxDimension: normalizeMaxDimension(record[imageCompressionMaxDimensionKey]),
     },
     imageMaxSizeMb: normalizeImageMaxSizeMb(record[imageMaxSizeMetadataKey]),
-    botStylishMessagesEnabled: normalizeBotStylishMessagesEnabled(record[botStylishMessagesEnabledKey]),
+    botStylishMessagesEnabled: false,
     botPrivatePostStylishEnabled: normalizeBotPrivatePostStylishEnabled(record[botPrivatePostStylishEnabledKey]),
     publishMode: normalizePublishMode(record[publishModeKey]),
     publishAccumulate: {
@@ -141,6 +141,7 @@ function normalizeMetadata(entries: Array<{ key: string; value: unknown }>) {
     enableMarkdownRender: normalizeEnableMarkdownRender(record[enableMarkdownRenderKey]),
     enableFontSelection: normalizeEnableFontSelection(record[enableFontSelectionKey]),
     enableAnonymousAvatarSelection: normalizeEnableAnonymousAvatarSelection(record[enableAnonymousAvatarSelectionKey]),
+    followedPostCommentNotifyEnabled: normalizeFollowedPostCommentNotifyEnabled(record[followedPostCommentNotifyEnabledKey]),
     availableFonts: [] as string[],
     availableBgColors: [] as Array<{ value: string; label: string; hex: string }>,
     availableTextColors: [] as Array<{ value: string; label: string; hex: string }>,
@@ -150,6 +151,12 @@ function normalizeMetadata(entries: Array<{ key: string; value: unknown }>) {
     maxActiveCampaignsPerUser: 0,
     enableConfessions: false,
     enableAggregateLogin: false,
+    enableBroadcast: false,
+    broadcastQuickPresets: [] as Array<{ label: string; minutes: number }>,
+    enableFeedback: false,
+    enableBotAlert: false,
+    enableGraduation: false,
+    enableTodayInHistory: false,
   };
 }
 
@@ -235,6 +242,19 @@ async function readPublicMetadata(tenantId: string) {
     metadata.enableConfessions = pluginConfig.confessions.enabled;
     // 聚合登录：未启用时服务页的「第三方登录」入口隐藏。
     metadata.enableAggregateLogin = pluginConfig.aggregateLogin.enabled;
+    // 广播通知：未启用时投稿页顶部胶囊与服务页入口隐藏；快选时长仅在该插件开启时透出。
+    metadata.enableBroadcast = pluginConfig.broadcast.enabled;
+    metadata.broadcastQuickPresets = pluginConfig.broadcast.enabled
+      ? pluginConfig.broadcast.quickPresets.map((preset) => ({ ...preset }))
+      : [];
+    // 意见反馈：未启用时投稿页顶部入口隐藏。
+    metadata.enableFeedback = pluginConfig.feedback.enabled;
+    // Bot 异常通知：仅暴露启用状态给管理端。
+    metadata.enableBotAlert = pluginConfig.botAlert.enabled;
+    // 毕业去向：未启用时投稿页顶部胶囊与服务页入口隐藏。
+    metadata.enableGraduation = pluginConfig.graduation.enabled;
+    // 那年今日：未启用时投稿页顶部胶囊隐藏。
+    metadata.enableTodayInHistory = pluginConfig.todayInHistory.enabled;
   } catch {
     // 缺少插件配置时保留 tenant_metadata 里的旧开关
   }
@@ -412,9 +432,6 @@ export function registerMetadataRoutes(app: FastifyInstance, config: CampuxConfi
     if (body.imageMaxSizeMb !== undefined) {
       updates.push({ key: imageMaxSizeMetadataKey, value: normalizeImageMaxSizeMb(body.imageMaxSizeMb) });
     }
-    if (body.botStylishMessagesEnabled !== undefined) {
-      updates.push({ key: botStylishMessagesEnabledKey, value: body.botStylishMessagesEnabled });
-    }
     if (body.botPrivatePostStylishEnabled !== undefined) {
       updates.push({ key: botPrivatePostStylishEnabledKey, value: body.botPrivatePostStylishEnabled });
     }
@@ -447,6 +464,9 @@ export function registerMetadataRoutes(app: FastifyInstance, config: CampuxConfi
     }
     if (body.enableAnonymousAvatarSelection !== undefined) {
       updates.push({ key: enableAnonymousAvatarSelectionKey, value: body.enableAnonymousAvatarSelection });
+    }
+    if (body.followedPostCommentNotifyEnabled !== undefined) {
+      updates.push({ key: followedPostCommentNotifyEnabledKey, value: body.followedPostCommentNotifyEnabled });
     }
 
     await prisma.$transaction(

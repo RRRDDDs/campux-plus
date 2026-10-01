@@ -82,6 +82,7 @@ type TenantSettingsForm = {
   publishAccumulateMaxImages: number;
   publishAccumulateStaleMinutes: number;
   publishLlmSummaryEnabled: boolean;
+  followedPostCommentNotifyEnabled: boolean;
 };
 
 type BanForm = {
@@ -234,7 +235,7 @@ const managementTabsTriggerClassName = "product-tabs-trigger after:hidden";
 
 function readMemberRoleQuery(): "all" | TenantRole {
   const role = readQueryParam("role");
-  return role === "submitter" || role === "reviewer" || role === "admin" ? role : "all";
+  return role === "submitter" || role === "broadcaster" || role === "reviewer" || role === "admin" ? role : "all";
 }
 
 function readMemberSortQuery(): MemberSort {
@@ -266,7 +267,7 @@ function banListPreferencesKey(tenantId: string) {
 }
 
 function isTenantRoleFilter(value: unknown): value is "all" | TenantRole {
-  return value === "all" || value === "submitter" || value === "reviewer" || value === "admin";
+  return value === "all" || value === "submitter" || value === "broadcaster" || value === "reviewer" || value === "admin";
 }
 
 function isMemberListPreferences(value: unknown): value is MemberListPreferences {
@@ -383,7 +384,7 @@ export function AdminPage({
     const nextForm = toForm(selectedTenant, metadata);
     setForm(nextForm);
     setImageMaxSizeDraft(String(nextForm.imageMaxSizeMb));
-  }, [selectedTenant.id, selectedTenant.slug, selectedTenant.name, selectedTenant.themeColor, metadata.brand, metadata.banner, metadata.logoUrl, metadata.pendingPostLimit, metadata.postRules, metadata.services, metadata.imageCompression.enabled, metadata.imageCompression.quality, metadata.imageCompression.maxDimension, metadata.imageMaxSizeMb, metadata.publishMode, metadata.publishAccumulate.minImages, metadata.publishAccumulate.maxImages, metadata.publishAccumulate.staleMinutes, metadata.publishLlmSummaryEnabled]);
+  }, [selectedTenant.id, selectedTenant.slug, selectedTenant.name, selectedTenant.themeColor, metadata.brand, metadata.banner, metadata.logoUrl, metadata.pendingPostLimit, metadata.postRules, metadata.services, metadata.imageCompression.enabled, metadata.imageCompression.quality, metadata.imageCompression.maxDimension, metadata.imageMaxSizeMb, metadata.publishMode, metadata.publishAccumulate.minImages, metadata.publishAccumulate.maxImages, metadata.publishAccumulate.staleMinutes, metadata.publishLlmSummaryEnabled, metadata.followedPostCommentNotifyEnabled]);
 
   useEffect(() => {
     if (activeTab === "users") {
@@ -565,6 +566,7 @@ export function AdminPage({
           publishAccumulateMaxImages: form.publishAccumulateMaxImages,
           publishAccumulateStaleMinutes: form.publishAccumulateStaleMinutes,
           publishLlmSummaryEnabled: form.publishLlmSummaryEnabled,
+          followedPostCommentNotifyEnabled: form.followedPostCommentNotifyEnabled,
         }),
       });
       await onSaved();
@@ -1132,6 +1134,8 @@ export function AdminPage({
                   setMemberPage(page);
                   writeQueryParams({ member_page: page > 1 ? page : null, page: null });
                 }}
+                currentUserId={currentUserId}
+                enableBroadcast={metadata.enableBroadcast}
                 onFormChange={setMemberForm}
                 onAddMember={() => void addMember()}
                 onRoleChange={(member, role) => void updateMemberRole(member, role)}
@@ -1377,6 +1381,8 @@ function UsersPanel({
   form,
   busy,
   loading,
+  currentUserId,
+  enableBroadcast,
   onKeywordChange,
   onRoleFilterChange,
   onSortChange,
@@ -1396,6 +1402,8 @@ function UsersPanel({
   form: MemberForm;
   busy: boolean;
   loading: boolean;
+  currentUserId: string;
+  enableBroadcast: boolean;
   onKeywordChange: (value: string) => void;
   onRoleFilterChange: (value: "all" | TenantRole) => void;
   onSortChange: (value: MemberSort) => void;
@@ -1427,6 +1435,7 @@ function UsersPanel({
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="submitter">{roleLabels.submitter}</SelectItem>
+              {enableBroadcast ? <SelectItem value="broadcaster">{roleLabels.broadcaster}</SelectItem> : null}
               <SelectItem value="reviewer">{roleLabels.reviewer}</SelectItem>
               <SelectItem value="admin">{roleLabels.admin}</SelectItem>
             </SelectContent>
@@ -1449,6 +1458,7 @@ function UsersPanel({
               <SelectContent>
                 <SelectItem value="all">全部身份</SelectItem>
                 <SelectItem value="submitter">{roleLabels.submitter}</SelectItem>
+                <SelectItem value="broadcaster">{roleLabels.broadcaster}</SelectItem>
                 <SelectItem value="reviewer">{roleLabels.reviewer}</SelectItem>
                 <SelectItem value="admin">{roleLabels.admin}</SelectItem>
               </SelectContent>
@@ -1493,13 +1503,17 @@ function UsersPanel({
                 </div>
               </div>
               <div className="flex items-center gap-2">
+                {member.user.systemRole === "operations_admin" && currentUserId !== member.user.id ? (
+                  <Badge variant="outline" title="运营管理员的墙内管理员身份受平台保护，只有系统运维或本人可以变更">运营管理员</Badge>
+                ) : null}
                 <div onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
-                  <Select value={member.role} onValueChange={(role) => onRoleChange(member, role as TenantRole)}>
+                  <Select value={member.role} onValueChange={(role) => onRoleChange(member, role as TenantRole)} disabled={member.user.systemRole === "operations_admin" && currentUserId !== member.user.id}>
                     <SelectTrigger className="bg-white font-bold">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="submitter">{roleLabels.submitter}</SelectItem>
+                      {enableBroadcast || member.role === "broadcaster" ? <SelectItem value="broadcaster">{roleLabels.broadcaster}</SelectItem> : null}
                       <SelectItem value="reviewer">{roleLabels.reviewer}</SelectItem>
                       <SelectItem value="admin">{roleLabels.admin}</SelectItem>
                     </SelectContent>
@@ -2024,6 +2038,18 @@ function MetadataPanel({
               disabled={busy}
               onCheckedChange={(value) => onFormChange({ ...form, publishLlmSummaryEnabled: value })}
               aria-label="启用说说文字 AI 总结"
+            />
+          </div>
+          <div className="flex items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-3 md:col-span-2">
+            <div>
+              <p className="text-sm font-medium text-slate-900">关注稿件评论通知</p>
+              <p className="text-xs text-slate-500">开启后，用户关注的稿件有新评论时，会按计划私信推送评论摘要（每天 10:00 / 22:00）。关闭后停止推送，稿件页的「关注评论」仍可使用。</p>
+            </div>
+            <Switch
+              checked={form.followedPostCommentNotifyEnabled}
+              disabled={busy}
+              onCheckedChange={(value) => onFormChange({ ...form, followedPostCommentNotifyEnabled: value })}
+              aria-label="启用关注稿件评论通知"
             />
           </div>
           <label className="grid gap-1 text-sm font-medium md:col-span-2">
@@ -4061,6 +4087,7 @@ function toForm(selectedTenant: TenantSummary, metadata: TenantMetadata): Tenant
     publishAccumulateMaxImages: metadata.publishAccumulate.maxImages,
     publishAccumulateStaleMinutes: metadata.publishAccumulate.staleMinutes,
     publishLlmSummaryEnabled: metadata.publishLlmSummaryEnabled,
+    followedPostCommentNotifyEnabled: metadata.followedPostCommentNotifyEnabled,
   };
 }
 

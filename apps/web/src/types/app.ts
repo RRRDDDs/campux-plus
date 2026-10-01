@@ -32,9 +32,9 @@ export type ConfessionOverview = {
   myQqUin: string;
   items: ConfessionItem[];
 };
-export type PostsTab = "mine" | "review" | "published";
+export type PostsTab = "mine" | "review" | "published" | "feedback" | "history";
 export type AdminTab = "users" | "bans" | "metadata" | "bots" | "publish" | "pluginConfig";
-export type TenantRole = "submitter" | "reviewer" | "admin";
+export type TenantRole = "submitter" | "broadcaster" | "reviewer" | "admin";
 export type SystemRole = "operations_admin" | "system_operator";
 
 export type OAuthServerSettings = {
@@ -179,6 +179,8 @@ export type TenantMetadata = {
   enableMarkdownRender: boolean;
   enableFontSelection: boolean;
   enableAnonymousAvatarSelection: boolean;
+  /** 关注稿件有新评论时是否私信推送摘要（墙面设置开关，默认开启） */
+  followedPostCommentNotifyEnabled: boolean;
   /** 字体选择插件启用的字体 value 白名单（包含 "default"） */
   availableFonts: string[];
   /** 多彩投稿插件启用的背景色预设（未配置时为空数组，投稿页不展示背景色选项） */
@@ -197,6 +199,16 @@ export type TenantMetadata = {
   enableConfessions: boolean;
   /** 聚合登录插件是否启用；关闭时服务页「第三方登录」入口隐藏 */
   enableAggregateLogin: boolean;
+  /** 广播通知插件是否启用；关闭时投稿页顶部胶囊与服务页入口隐藏 */
+  enableBroadcast: boolean;
+  /** 广播通知快选生效时长（插件配置下发）；发帖人点一下即可按当前时刻推算结束时间 */
+  broadcastQuickPresets: Array<{ label: string; minutes: number }>;
+  enableFeedback: boolean;
+  enableBotAlert: boolean;
+  /** 毕业去向插件是否启用；关闭时投稿页顶部胶囊与服务页入口隐藏 */
+  enableGraduation: boolean;
+  /** 那年今日插件是否启用；关闭时投稿页顶部胶囊隐藏 */
+  enableTodayInHistory: boolean;
 };
 
 export type BotMessageTypeConfig = {
@@ -271,7 +283,76 @@ export type TenantPluginConfig = {
     appKey: string;
     endpoint: string;
   };
+  /** 广播通知插件：开关 + 快选生效时长 */
+  broadcast: {
+    enabled: boolean;
+    quickPresets: PluginBroadcastPreset[];
+  };
+  /** 意见反馈插件 */
+  feedback: {
+    enabled: boolean;
+  };
+  botAlert: {
+    enabled: boolean;
+    smtpHost: string;
+    smtpPort: number;
+    smtpUser: string;
+    smtpPass: string;
+    fromEmail: string;
+    toEmails: string[];
+  };
+  /** 毕业去向插件：开关 */
+  graduation: {
+    enabled: boolean;
+  };
+  /** 那年今日插件：开关 */
+  todayInHistory: {
+    enabled: boolean;
+  };
 };
+
+export type PluginBroadcastPreset = {
+  /** 管理员填写的展示名，如「半小时内」 */
+  label: string;
+  /** 自当前时刻起算的分钟数 */
+  minutes: number;
+};
+/** 广播通知：投稿页发起，有明确时效结束时间 */
+export type BroadcastItem = {
+  id: string;
+  displayId: number;
+  content: string;
+  endsAt: string;
+  broadcastCount: number;
+  /** 发出后作者改过内容：卡片橙色，排在未广播之后已广播之前 */
+  modified: boolean;
+  createdAt: string;
+  updatedAt: string;
+  author: { displayName: string | null; qqUin: string } | null;
+};
+
+/** 广播通知历史版本快照 */
+export type BroadcastVersion = {
+  id: string;
+  version: number;
+  content: string;
+  /** 本次发出（首发）或修改的时间 */
+  changedAt: string;
+  endsAt: string;
+  broadcastCount: number;
+  changedBy: { displayName: string | null; qqUin: string } | null;
+};
+
+export type BroadcastListResponse = {
+  items: BroadcastItem[];
+  now: string;
+  pagination: { page: number; limit: number; total: number };
+};
+
+export type BroadcastVersionListResponse = {
+  versions: BroadcastVersion[];
+};
+
 export type PostAttachment = {
   kind: "image";
   key: string;
@@ -984,4 +1065,25 @@ export type AuditLogItem = {
     qqUin: string;
     displayName: string | null;
   } | null;
+};
+
+export type FeedbackMessageItem = {
+  id: string;
+  role: "user" | "admin";
+  authorLabel: string | null;
+  content: string;
+  createdAt: string;
+};
+
+export type FeedbackItem = {
+  id: string;
+  content: string;
+  createdAt: string;
+  author: {
+    id: string;
+    displayName: string | null;
+    qqUin: string;
+  };
+  canViewIdentity: boolean;
+  messages: FeedbackMessageItem[];
 };

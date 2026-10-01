@@ -14,6 +14,7 @@ export const tenantPluginConfigKey = "plugin_config";
 export const BOT_MESSAGE_TYPE_MAX_LENGTH = 10;
 export const ANONYMOUS_AVATAR_MAX_COUNT = 20;
 export const COLOR_PRESET_MAX_COUNT = 10;
+export const BROADCAST_PRESET_MAX_COUNT = 5;
 
 const colorPresetSchema = z.object({
   value: z.string().min(1).max(40),
@@ -103,6 +104,31 @@ export const tenantPluginConfigSchema = z.object({
       aiScreenEnabled: true,
       allowWebSubmit: true,
     }),
+  // 广播通知：开启后投稿页顶部出现「广播通知」胶囊与服务页入口。
+  // quickPresets 是管理员配置的「快选生效时长」，发帖人点一下即可按当前时间推算结束时间；
+  // 通知本身落 TenantBroadcast 表，不在本配置里持久化。
+  broadcast: z
+    .object({
+      enabled: z.boolean(),
+      quickPresets: z
+        .array(
+          z.object({
+            label: z.string().min(1).max(24),
+            // 自当前时刻起算的分钟数，必须为正且不超过 7 天
+            minutes: z.number().int().min(1).max(10080),
+          }),
+        )
+        .max(BROADCAST_PRESET_MAX_COUNT)
+        .default([]),
+    })
+    .default({ enabled: false, quickPresets: [] }),
+  // 毕业去向：开启后投稿页顶部出现「毕业」胶囊与服务页入口；
+  // 入学年份（级）与毕业年份（届）均由用户在投稿页自行填写，审核通过后计入服务页统计。
+  graduation: z
+    .object({
+      enabled: z.boolean(),
+    })
+    .default({ enabled: false }),
   // 聚合登录：把第三方平台（QQ/微信/支付宝等）身份绑定到已有账号后，用该身份直接登录。
   // 凭证（appid/appkey/endpoint）放在本配置里（租户级）；未绑定的第三方身份不自动建号，
   // 而是引导先登录已有账号完成绑定（严格「只做第三方登录、不涉及注册」）。
@@ -123,6 +149,30 @@ export const tenantPluginConfigSchema = z.object({
       appKey: "",
       endpoint: "",
     }),
+  // 意见反馈：开启后投稿页顶部出现入口；提交后发到审核群。
+  feedback: z
+    .object({
+      enabled: z.boolean(),
+    })
+    .default({ enabled: false }),
+  // Bot 异常通知：登录态失效且自动刷新失败时，向配置的邮箱发送通知。
+  botAlert: z
+    .object({
+      enabled: z.boolean(),
+      smtpHost: z.string().max(255).default(""),
+      smtpPort: z.number().int().min(1).max(65535).default(465),
+      smtpUser: z.string().max(255).default(""),
+      smtpPass: z.string().max(255).default(""),
+      fromEmail: z.string().max(255).default(""),
+      toEmails: z.array(z.string().max(255)).max(20).default([]),
+    })
+    .default({ enabled: false, smtpHost: "", smtpPort: 465, smtpUser: "", smtpPass: "", fromEmail: "", toEmails: [] }),
+  // 那年今日：开启后投稿页顶部出现「那年今日」胶囊，展示历史上同一月同一日的已发布稿件。
+  todayInHistory: z
+    .object({
+      enabled: z.boolean(),
+    })
+    .default({ enabled: false }),
 });
 
 export type TenantPluginConfig = z.infer<typeof tenantPluginConfigSchema>;
@@ -144,6 +194,8 @@ export const defaultTenantPluginConfig: TenantPluginConfig = {
     aiScreenEnabled: true,
     allowWebSubmit: true,
   },
+  broadcast: { enabled: false, quickPresets: [] },
+  graduation: { enabled: false },
   aggregateLogin: {
     enabled: false,
     loginTypes: [],
@@ -151,6 +203,9 @@ export const defaultTenantPluginConfig: TenantPluginConfig = {
     appKey: "",
     endpoint: "",
   },
+  feedback: { enabled: false },
+  botAlert: { enabled: false, smtpHost: "", smtpPort: 465, smtpUser: "", smtpPass: "", fromEmail: "", toEmails: [] },
+  todayInHistory: { enabled: false },
 };
 
 export function parseTenantPluginConfig(value: unknown): TenantPluginConfig {
@@ -221,6 +276,14 @@ export function maskAggregateAppKey(config: TenantPluginConfig): TenantPluginCon
   };
 }
 
+/** 段级别脱敏：对 aggregateLogin 配置段本身（非完整配置）脱敏 AppKey，供审计日志等使用。 */
+export function maskAggregateLoginSection<T extends { appKey?: string }>(section: T): T {
+  if (section && typeof section === "object" && section.appKey) {
+    return { ...section, appKey: AGGREGATE_APPKEY_MASK };
+  }
+  return section;
+}
+
 /** 保存方向：若组件提交的 AppKey 仍是掩码占位符，说明未改动，用库中原值替换，避免把掩码写回。 */
 export function restoreAggregateAppKey(submitted: TenantPluginConfig, existing: TenantPluginConfig): TenantPluginConfig {
   const appKey = submitted.aggregateLogin.appKey;
@@ -231,4 +294,40 @@ export function restoreAggregateAppKey(submitted: TenantPluginConfig, existing: 
     };
   }
   return submitted;
+}
+
+export const BOT_ALERT_PASS_MASK = "••••••••";
+
+export function maskBotAlertPass(config: TenantPluginConfig): TenantPluginConfig {
+  if (!config.botAlert.smtpPass) return config;
+  return { ...config, botAlert: { ...config.botAlert, smtpPass: BOT_ALERT_PASS_MASK } };
+}
+
+export function maskBotAlertSection<T extends { smtpPass?: string }>(section: T): T {
+  if (section && typeof section === "object" && section.smtpPass) {
+    return { ...section, smtpPass: BOT_ALERT_PASS_MASK };
+  }
+  return section;
+}
+
+export function restoreBotAlertPass(submitted: TenantPluginConfig, existing: TenantPluginConfig): TenantPluginConfig {
+  if (submitted.botAlert.smtpPass === BOT_ALERT_PASS_MASK) {
+    return { ...submitted, botAlert: { ...submitted.botAlert, smtpPass: existing.botAlert.smtpPass } };
+  }
+  return submitted;
+}
+
+// 审计读取兜底：历史明细行可能在脱敏修复前写入了明文凭证，读取端点返回 detail 前
+// 对 before/after 段做再脱敏，保证 aggregateLogin.appKey / botAlert.smtpPass 不回显。
+export function maskAuditDetailSections<T>(detail: T): T {
+  if (!detail || typeof detail !== "object") return detail;
+  const source = detail as Record<string, unknown>;
+  const result: Record<string, unknown> = { ...source };
+  for (const key of ["before", "after"]) {
+    const section = result[key];
+    if (section && typeof section === "object") {
+      result[key] = maskBotAlertSection(maskAggregateLoginSection(section as Record<string, unknown>));
+    }
+  }
+  return result as T;
 }

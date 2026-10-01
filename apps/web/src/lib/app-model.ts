@@ -47,6 +47,7 @@ export const defaultMetadata: TenantMetadata = {
   enableMarkdownRender: false,
   enableFontSelection: false,
   enableAnonymousAvatarSelection: false,
+  followedPostCommentNotifyEnabled: true,
   availableFonts: [],
   availableBgColors: [],
   availableTextColors: [],
@@ -56,7 +57,13 @@ export const defaultMetadata: TenantMetadata = {
   maxActiveCampaignsPerUser: 0,
   enableConfessions: false,
   enableAggregateLogin: false,
-};
+  enableBroadcast: false,
+  broadcastQuickPresets: [],
+  enableFeedback: false,
+  enableBotAlert: false,
+  enableGraduation: false,
+  enableTodayInHistory: false,
+  };
 
 export const navItems = [
   { value: "post", label: "投稿", emoji: "📝", icon: HomeIcon, minRole: "submitter" },
@@ -69,12 +76,14 @@ export const navItems = [
 
 const roleRank: Record<TenantRole, number> = {
   submitter: 1,
-  reviewer: 2,
-  admin: 3,
+  broadcaster: 2,
+  reviewer: 3,
+  admin: 4,
 };
 
 export const roleLabels: Record<TenantRole, string> = {
   submitter: "用户",
+  broadcaster: "广播员",
   reviewer: "审核员",
   admin: "管理员",
 };
